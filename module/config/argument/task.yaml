@@ -1,0 +1,512 @@
+Alas:
+  menu: collapse
+  page: setting
+  tasks:
+    Alas:
+      - Emulator
+      - EmulatorInfo
+      - Error
+      - DailySummary
+      - Optimization
+      - DropRecord
+      - Backup
+      - EmulatorManagement
+    General:
+      - Log
+      - Retirement
+      - OneClickRetire
+      - Enhance
+      - OldRetire
+      - PublicEmotion
+      - YukikazeTaskManager
+    Restart:
+      - Scheduler
+      - Restart
+Farm:
+  menu: collapse
+  page: setting
+  tasks:
+    Main:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    Main2:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    Main3:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    GemsFarming:
+      - Scheduler
+      - GemsFarming
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - EnemyPriority
+    ThreeOilLowCost:
+      - Scheduler
+      - GemsFarming
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - EnemyPriority
+    Ambush11:
+      - Scheduler
+      - GemsFarming
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+Event:
+  menu: collapse
+  page: setting
+  tasks:
+    EventGeneral:
+      - EventGeneral
+      - TaskBalancer
+    Event:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    Event2:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    Event3:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    Raid:
+      - Scheduler
+      - Raid
+      - Campaign
+      - StopCondition
+      - Emotion
+    RaidScuttle:
+      - Scheduler
+      - Raid
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+    Hospital:
+      - Scheduler
+      - Hospital
+      - StopCondition
+      - Emotion
+    Coalition:
+      - Scheduler
+      - Campaign
+      - Coalition
+      - StopCondition
+      - Emotion
+    CoalitionScuttle:
+      - Scheduler
+      - CoalitionScuttle
+      - Campaign
+      - Coalition
+      - StopCondition
+      - Emotion
+    MaritimeEscort:
+      - Scheduler
+      - MaritimeEscort
+    EventShop:
+      - Scheduler
+      - EventShop
+      - ShopAdvanced
+    WarArchives:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - WarArchives
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+EventDaily:
+  menu: collapse
+  page: setting
+  tasks:
+    EventA:
+      - Scheduler
+      - EventDaily
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    EventB:
+      - Scheduler
+      - EventDaily
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    EventC:
+      - Scheduler
+      - EventDaily
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    EventD:
+      - Scheduler
+      - EventDaily
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    EventSp:
+      - Scheduler
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - HpControl
+      - EnemyPriority
+    RaidDaily:
+      - Scheduler
+      - RaidDaily
+      - Campaign
+      - StopCondition
+      - Emotion
+    CoalitionSp:
+      - Scheduler
+      - Campaign
+      - Coalition
+      - StopCondition
+      - Emotion
+
+# ==================== Reward ====================
+
+Reward:
+  menu: collapse
+  page: setting
+  tasks:
+    Commission:
+      - Scheduler
+      - Commission
+    Tactical:
+      - Scheduler
+      - Tactical
+      - ControlExpOverflow
+      - AddNewStudent
+    Research:
+      - Scheduler
+      - Research
+    Dorm:
+      - Scheduler
+      - Dorm
+      - BuyFurniture
+    Meowfficer:
+      - Scheduler
+      - Meowfficer
+      - MeowfficerTrain
+    Guild:
+      - Scheduler
+      - GuildLogistics
+      - GuildOperation
+    Reward:
+      - Scheduler
+      - Reward
+    Awaken:
+      - Scheduler
+      - Awaken
+    Secretary:
+      - Scheduler
+      - Secretary
+    OperationHandover:
+      - Scheduler
+      - Campaign
+      - OperationHandover
+DailyMission:
+  menu: collapse
+  page: setting
+  tasks:
+    Daily:
+      - Scheduler
+      - Daily
+    Hard:
+      - Scheduler
+      - Hard
+    Exercise:
+      - Scheduler
+      - Exercise
+    ShopFrequent:
+      - Scheduler
+      - GeneralShop
+      - ShopAdvanced
+    ShopOnce:
+      - Scheduler
+      - GuildShop
+      - MedalShop2
+      - MeritShop
+      - CoreShop
+      - ShopAdvanced
+    Shipyard:
+      - Scheduler
+      - ShipyardDr
+      - Shipyard
+    Gacha:
+      - Scheduler
+      - Gacha
+    Freebies:
+      - Scheduler
+      - BattlePass
+      - DataKey
+      - Mail
+      - SupplyPack
+    Minigame:
+      - Scheduler
+    PrivateQuarters:
+      - Scheduler
+      - PrivateQuarters
+      - ShopAdvanced
+Opsi:
+  menu: collapse
+  page: setting
+  tasks:
+    OpsiGeneral:
+      - OpsiGeneral
+    OpsiAshBeacon:
+      - Scheduler
+      - OpsiAshBeacon
+    OpsiAshAssist:
+      - Scheduler
+      - OpsiAshAssist
+    OpsiExplore:
+      - Scheduler
+      - OpsiExplore
+      - OpsiFleet
+    OpsiShop:
+      - Scheduler
+      - OpsiShop
+      - ShopAdvanced
+    OpsiVoucher:
+      - Scheduler
+      - OpsiVoucher
+      - ShopAdvanced
+    OpsiDaily:
+      - Scheduler
+      - OpsiDaily
+      - OpsiFleet
+    OpsiObscure:
+      - Scheduler
+      - OpsiObscure
+      - OpsiFleet
+    OpsiAbyssal:
+      - Scheduler
+      - OpsiAbyssal
+      - OpsiFleetFilter
+    OpsiArchive:
+      - Scheduler
+      - OpsiFleet
+    OpsiStronghold:
+      - Scheduler
+      - OpsiStronghold
+      - OpsiFleetFilter
+    OpsiMonthBoss:
+      - Scheduler
+      - OpsiMonthBoss
+      - OpsiFleetFilter
+    OpsiMeowfficerFarming:
+      - Scheduler
+      - OpsiMeowfficerFarming
+      - OpsiSirenBug
+      - OpsiTarget
+      - OpsiFleet
+    OpsiHazard1Leveling:
+      - Scheduler
+      - OpsiHazard1Leveling
+      - OpsiSirenBug
+      - OpsiFleet
+      - OpsiCheckLeveling
+      - OpsiFleetAutoChange
+    OpsiScheduling:
+      - Scheduler
+      - OpsiScheduling
+    OpsiPreventActionPointOverflow:
+      - Scheduler
+      - OpsiPreventActionPointOverflow
+    OpsiCrossMonth:
+      - Scheduler
+    OpsiSimulator:
+      - OpsiSimulatorParameters
+
+# ==================== Island ====================
+
+Island:
+  menu: 'collapse'
+  page: 'setting'
+  tasks:
+    IslandPlan:
+      - IslandPlan
+    IslandBusiness:
+      - Scheduler
+      - IslandBusiness
+      - IslandBusinessShop1
+      - IslandBusinessShop2
+      - IslandBusinessShop3
+      - IslandBusinessShop4
+      - IslandBusinessShop5
+    IslandFarm:
+      - Scheduler
+      - IslandFarm
+      - IslandOrchard
+      - IslandNursery
+    IslandRancher:
+      - Scheduler
+      - IslandRancher
+      - IslandFishery
+    IslandMineForest:
+      - Scheduler
+      - IslandMine
+      - IslandForest
+    IslandRestaurant:
+      - Scheduler
+      - IslandRestaurant
+      - IslandRestaurantNextTask
+    IslandTeahouse:
+      - Scheduler
+      - IslandTeahouse
+      - IslandTeahouseNextTask
+    IslandGrill:
+      - Scheduler
+      - IslandGrill
+      - IslandGrillNextTask
+    IslandJuuEatery:
+      - Scheduler
+      - IslandJuuEatery
+      - IslandJuuEateryNextTask
+    IslandJuuCoffee:
+      - Scheduler
+      - IslandJuuCoffee
+      - IslandJuuCoffeeNextTask
+    IslandManufacture:
+      - Scheduler
+      - WoodProcessing
+      - ElectronicProcessing
+      - Industrial
+      - Handmade
+    IslandDailyGather:
+      - Scheduler
+      - IslandDailyGather
+    IslandAirDrop:
+      - Scheduler
+      - IslandAirDrop
+    IslandCargoPreparation:
+      - Scheduler
+      - IslandCargoPreparation
+    IslandDailyOrder:
+      - Scheduler
+      - IslandDailyOrder
+    IslandDailyInteract:
+      - Scheduler
+      - IslandDailyInteract
+    IslandPearlSell:
+      - Scheduler
+      - IslandPearlSell
+
+# ==================== Fleet Management ====================
+
+FleetManagement:
+  menu: collapse
+  page: setting
+  tasks:
+    FleetInfo:
+      - FleetInfo
+
+# ==================== Tool ====================
+
+Tool:
+  menu: collapse
+  page: tool
+  tasks:
+    FleetScan: []
+    Daemon:
+      - Daemon
+    OpsiDaemon:
+      - OpsiDaemon
+    EventStory:
+      - EventStory
+    BoxDisassemble:
+      - BoxDisassemble
+    AutoEquip:
+      - AutoEquip
+    Benchmark:
+      - Benchmark
+    OcrBenchmark:
+      - OcrBenchmark
+    AzurLaneUncensored:
+      - AzurLaneUncensored
+    GameManager:
+      - GameManager
+    EmulatorManager:
+      - EmulatorManager
+Dashboard:
+  page: dashboard
+  tasks:
+    Dashboard:
+      - Oil
+      - Coin
+      - Gem
+      - Pt
+      - Cube
+      - ActionPoint
+      - YellowCoin
+      - PurpleCoin
+      - Core
+      - Medal
+      - Merit
+      - GuildCoin

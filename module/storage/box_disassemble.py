@@ -1,0 +1,230 @@
+"""存储箱操作模块，处理装备箱的使用和装备拆解功能。
+支持按稀有度筛选装备箱、设置使用数量，
+以及仓库已满时的自动拆解清理。"""
+
+from module.base.timer import Timer
+from module.base.utils import rgb2gray
+from module.logger import logger
+from module.ocr.ocr import Digit
+from module.shop.assets import AMOUNT_MAX, AMOUNT_MINUS, AMOUNT_PLUS
+from module.storage.assets import *
+from module.storage.storage import StorageHandler
+
+BOX_DISASSEMBLE_DICT = {
+    3: 'Purple',
+    2: 'Blue',
+    1: 'White',
+}
+
+
+class StorageBox(StorageHandler):
+    box_preserve_amount = 2000
+    BOX_MAX_USE_AMOUNT = 100
+
+    def _handle_use_box_amount(self, amount):
+        """设置箱子使用数量。
+
+        Returns:
+            bool: 是否成功设置。
+
+        Pages:
+            in: SHOP_BUY_CONFIRM_AMOUNT
+        """
+        logger.info(f'[存储-拆箱] 设置箱子数量')
+
+        # 与商店店员逻辑相同的数量输入处理
+        ocr = Digit(BOX_AMOUNT_OCR, letter=(239, 239, 239), name='OCR_SHOP_AMOUNT')
+        index_offset = (40, 50)
+
+        # 等待数量按钮出现
+        timeout = Timer(1, count=3).start()
+        for _ in self.loop():
+            # 防止 +/- 按钮位置偏移，使用船坞 OCR 技巧精确解析
+            if self.appear(AMOUNT_MINUS, offset=index_offset) and self.appear(AMOUNT_PLUS, offset=index_offset) and \
+                    self.appear(AMOUNT_MAX, offset=index_offset):
+                break
+            if timeout.reached():
+                logger.warning('[存储-拆箱] 等待数量按钮超时')
+                break
+
+        # 等待 OCR 识别到正常数字
+        current = 0
+        timeout = Timer(1, count=3).start()
+        for _ in self.loop():
+            current = ocr.ocr(self.device.image)
+            if 1 <= current <= amount + 10:
+                break
+            if timeout.reached():
+                logger.warning('[存储-拆箱] 等待箱子数量超时')
+                break
+
+        # 设置数量，类似 ui_ensure_index 的逻辑
+        logger.info(f'[存储-拆箱] 设置箱子数量: {amount}')
+        skip_first = True
+        retry = Timer(1, count=2)
+        for _ in self.loop():
+            if skip_first:
+                skip_first = False
+            else:
+                current = ocr.ocr(self.device.image)
+            diff = amount - current
+            if diff == 0:
+                break
+
+            if retry.reached():
+                if amount > self.BOX_MAX_USE_AMOUNT // 2 and abs(diff) >= self.BOX_MAX_USE_AMOUNT // 2:
+                    self.device.click(AMOUNT_MAX)
+                else:
+                    button = AMOUNT_PLUS if diff > 0 else AMOUNT_MINUS
+                    self.device.multi_click(button, n=abs(diff), interval=(0.1, 0.2))
+                retry.reset()
+
+        return True
+
+    def _check_box_amount(self, button):
+        """检查指定箱子的数量。
+
+        Args:
+            button: 箱子对应的按钮。
+
+        Returns:
+            int: 箱子数量。
+
+        Pages:
+            in: MATERIAL_CHECK
+            out: BOX_USE
+        """
+        logger.hr('[存储-拆箱] 检查箱子数量')
+        amount = 0
+        ocr = Digit(BOX_REMAIN_AMOUNT_OCR, letter=(229, 227, 3), name='OCR_BOX_REAMIN_AMOUNT')
+        self.interval_clear(MATERIAL_CHECK)
+        for _ in self.loop():
+            if self._storage_in_material(interval=5):
+                self.device.click(button)
+                continue
+            if self.appear(BOX_USE, offset=(-330, -20, 20, 20)):
+                break
+
+        timeout = Timer(1, count=3).start() 
+        for _ in self.loop():
+            amount = ocr.ocr(self.device.image)
+            if amount > 0:
+                break
+            if timeout.reached():
+                logger.warning('[存储-拆箱] 等待检查箱子数量超时')
+                break
+        return amount
+
+    def _storage_use_multi_box(self, buttons):
+        """批量使用多个箱子。
+
+        Args:
+            buttons: 箱子按钮列表。
+
+        Returns:
+            int: 实际使用的箱子数量（不精确），-1 表示拆解结束。
+
+        Pages:
+            in: MATERIAL_CHECK
+            out: MATERIAL_CHECK
+        """
+        logger.hr('[存储-拆箱] 使用多个箱子')
+        used = 0
+        end = True
+        for box_button in buttons:
+            box_amount = self._check_box_amount(box_button)
+            preserve = self.box_preserve_amount
+            if box_amount <= preserve:
+                self.ui_click(MATERIAL_ENTER, check_button=self._storage_in_material, appear_button=BOX_USE, 
+                              offset=(-330, -20, 20, 20), retry_wait=3, skip_first_screenshot=True)
+                self.device.click_record_clear()
+                continue
+            end = False
+            used += self._storage_use_one_box(box_button, amount=min(box_amount - preserve, 100))
+        if end:
+            return -1
+        return used
+
+    def _storage_use_box_in_page(self, rarity, amount, skip_first_screenshot=False):
+        """在当前页面使用指定稀有度的箱子。
+
+        Args:
+            rarity: 箱子稀有度。
+            amount: 期望使用的箱子数量。
+            skip_first_screenshot: 是否跳过首次截图。
+
+        Returns:
+            int: 实际使用的箱子数量（不精确），-1 表示拆解结束。
+
+        Pages:
+            in: MATERIAL_CHECK
+            out: MATERIAL_CHECK
+        """
+        used = 0
+        timeout = Timer(1.5, count=3).start()
+        while 1:
+            logger.attr('[存储-拆箱] 已使用', f'{used}')
+            if used >= amount:
+                logger.info('[存储-拆箱] 达到目标数量，停止')
+                break
+            if timeout.reached():
+                logger.info('[存储-拆箱] 此页面没有更多箱子，停止')
+                break
+
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            image = rgb2gray(self.device.image)
+            box_buttons = self._storage_box_template(rarity).match_multi(image, similarity=0.9)
+            if box_buttons:
+                box_used = self._storage_use_multi_box(box_buttons)
+                # 拆解结束
+                if box_used == -1:
+                    used = 0
+                    break
+                used += box_used
+                timeout.reset()
+                continue
+            else:
+                logger.info('[存储-拆箱] 未找到箱子')
+                continue
+
+        return used
+
+    def box_disassemble(self, rarity=1, preserve=2000):
+        """拆解指定稀有度的箱子。
+
+        Args:
+            rarity: 稀有度，1=普通, 2=稀有, 3=精锐, 4=超稀有。
+            preserve: 期望保留的箱子数量。
+
+        Pages:
+            in: Any
+            out: page_main
+        """
+        logger.hr(f'[存储-拆箱] 拆解T{rarity}箱子', level=2)
+        self.box_preserve_amount = preserve
+        self.storage_disassemble_equipment(rarity=rarity, amount=1000000)
+        self.ui_goto_main()
+
+    def run(self):
+        """执行箱子拆解任务，按配置遍历各稀有度箱子并拆解。
+
+        Pages:
+            in: Any page
+            out: page_main
+        """
+        logger.hr('[存储-拆箱] 箱子拆解', level=1)
+        for rarity, box_color in BOX_DISASSEMBLE_DICT.items():
+            if self.config.__getattribute__(f'BoxDisassemble_Use{box_color}Box'):
+                self.box_disassemble(
+                    rarity=rarity,
+                    preserve=self.config.__getattribute__(f'BoxDisassemble_{box_color}BoxLimit')
+                )
+
+
+if __name__ == '__main__':
+    self = StorageBox(config='alas')
+    self.run()

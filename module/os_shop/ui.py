@@ -1,0 +1,182 @@
+"""大世界商店 UI 操作模块。
+
+提供大世界商店界面的通用 UI 操作，包括商店页面加载检测、
+侧边栏导航（明石商店/港口商店）、自适应滚动条控制、
+安全区域点击防护以及死循环检测等基础交互功能。
+"""
+from typing import Tuple
+from module.base.button import ButtonGrid
+from module.base.decorator import cached_property
+from module.base.timer import Timer
+from module.base.utils import random_rectangle_vector
+from module.exception import GameStuckError
+from module.os_shop.assets import OS_SHOP_CHECK, OS_SHOP_SAFE_AREA, OS_SHOP_SCROLL_AREA
+from module.logger import logger
+from module.ui.navbar import Navbar
+from module.ui.scroll import AdaptiveScroll
+from module.ui.ui import UI
+
+# 大世界商店+滚动条配置
+OS_SHOP_SCROLL = AdaptiveScroll(
+    OS_SHOP_SCROLL_AREA.button,
+    parameters={
+        'height': 255 - 99,
+        'prominence': 40,
+    },
+    name="OS_SHOP_SCROLL"
+)
+OS_SHOP_SCROLL.drag_threshold = 0.1
+OS_SHOP_SCROLL.edge_threshold = 0.1
+
+
+class OSShopUI(UI):
+    """大世界商店+ UI 操作类。
+
+    提供商店页面加载检测、侧边栏导航、滚动条控制等功能。
+    """
+
+    def os_shop_load_ensure(self, skip_first_screenshot=True):
+        """确保商店页面完全加载。
+
+        切换侧边栏后需要等待页面加载完成，类似舰队后勤的加载逻辑。
+
+        Args:
+            skip_first_screenshot: 是否跳过首次截图。
+
+        Returns:
+            bool: 页面加载完成返回 True。
+
+        Raises:
+            GameStuckError: 等待超时抛出。
+        """
+        ensure_timeout = Timer(3, count=6).start()
+        while True:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            # 结束条件
+            if self.appear(OS_SHOP_CHECK):
+                return True
+            else:
+                logger.warning('大世界商店+未出现，正在重试')
+
+            # 异常处理
+            if ensure_timeout.reached():
+                raise GameStuckError('等待大世界商店+出现超时')
+
+    @cached_property
+    def _os_shop_side_navbar(self):
+        """获取商店侧边栏导航组件。
+
+        侧边栏包含 4 个选项：
+            NY（纽约）、Liverpool（利物浦）、Gibraltar（直布罗陀）、St. Petersburg（圣彼得堡）
+        """
+        os_shop_side_navbar = ButtonGrid(
+            origin=(44, 266), delta=(0, 87),
+            button_shape=(231, 46), grid_shape=(1, 4),
+            name='OS_SHOP_SIDE_NAVBAR')
+
+        return Navbar(grids=os_shop_side_navbar,
+                      active_color=(43, 94, 248), active_threshold=30,
+                      inactive_color=(12, 58, 86), inactive_threshold=30)
+
+    def os_shop_side_navbar_ensure(self, upper=None, bottom=None):
+        """确保侧边栏导航到指定页面。
+
+        Args:
+            upper: 从上往下的索引。
+                limited|regular
+                    1     NY
+                    2     Liverpool
+                    3     Gibraltar
+                    4     St. Petersburg
+            bottom: 从下往上的索引。
+                limited|regular
+                    4     NY
+                    3     Liverpool
+                    2     Gibraltar
+                    1     St. Petersburg
+
+        Pages:
+            in: PORT_SUPPLY_CHECK
+            out: PORT_SUPPLY_CHECK
+        """
+        logger.info(f'大世界商店+侧边栏切换到 {upper or bottom}')
+        self.os_shop_load_ensure()
+        self._os_shop_side_navbar.set(self, upper=upper, bottom=bottom)
+
+    def init_slider(self) -> Tuple[float, float]:
+        """初始化滚动条位置。
+
+        确保滚动条出现并滚动到顶部。
+
+        Returns:
+            Tuple[float, float]: (前一位置, 当前位置)，初始为 (-1.0, 0.0)。
+
+        Raises:
+            GameStuckError: 滚动操作失败时抛出。
+        """
+        if not OS_SHOP_SCROLL.appear(main=self):
+            logger.warning('大世界商店+滚动条未出现，尝试修复')
+            self.rescue_slider()
+        retry = Timer(0, count=3)
+        retry.start()
+        while not OS_SHOP_SCROLL.at_top(main=self):
+            logger.info('大世界商店+滚动条不在顶部，尝试滚动')
+            OS_SHOP_SCROLL.set_top(main=self)
+            if retry.reached():
+                raise GameStuckError('大世界商店+滚动条拖动页面失败')
+        return -1.0, 0.0
+
+    def rescue_slider(self, distance=200):
+        """救援滚动条。
+
+        当滚动条不可见时，通过拖拽操作使其重新出现。
+
+        Args:
+            distance: 拖拽距离，默认 200 像素。
+        """
+        detection_area = (1130, 230, 1170, 710)
+        direction_vector = (0, distance)
+        p1, p2 = random_rectangle_vector(
+            direction_vector, box=detection_area, random_range=(-10, -40, 10, 40), padding=10)
+        self.device.drag(p1, p2, segments=2, shake=(25, 0), point_random=(0, 0, 0, 0), shake_random=(-5, 0, 5, 0))
+        self.device.click(OS_SHOP_SAFE_AREA)
+        self.device.screenshot()
+
+    def pre_scroll(self, pre_pos, cur_pos) -> float:
+        """预处理滚动操作。
+
+        当滚动失败时尝试救援滚动条并重试。
+
+        Args:
+            pre_pos: 前一位置。
+            cur_pos: 当前位置。
+
+        Returns:
+            float: 滚动后的位置。
+
+        Raises:
+            GameStuckError: 滚动重试失败时抛出。
+        """
+        if pre_pos == cur_pos:
+            logger.warning('大世界商店+滚动条拖动页面失败')
+            if not OS_SHOP_SCROLL.appear(main=self):
+                logger.warning('大世界商店+滚动条未出现，尝试修复')
+                self.rescue_slider()
+                OS_SHOP_SCROLL.set(cur_pos, main=self)
+            retry = Timer(0, count=3)
+            retry.start()
+            while True:
+                logger.warning('大世界商店+滚动条拖动未成功，正在重试')
+                OS_SHOP_SCROLL.next_page(main=self, page=0.5, skip_first_screenshot=False)
+                cur_pos = OS_SHOP_SCROLL.cal_position(main=self)
+                if pre_pos != cur_pos:
+                    logger.info(f'大世界商店+滚动条已拖动到 {cur_pos}')
+                    return cur_pos
+                if retry.reached():
+                    raise GameStuckError('大世界商店+滚动条拖动页面失败')
+        else:
+            return cur_pos

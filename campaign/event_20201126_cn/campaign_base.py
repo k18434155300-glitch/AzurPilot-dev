@@ -1,0 +1,110 @@
+from module.base.button import Button
+from module.campaign.assets import EVENT_20201126_DETAIL, EVENT_20201126_DETAIL_CHECK, EVENT_20201126_DETAIL_WHITE, \
+    EVENT_20201126_ENTRANCE, EVENT_20201126_ENTRANCE_TEMP, EVENT_20201126_PT_ICON
+from module.campaign.campaign_base import CampaignBase as CampaignBase_
+from module.exception import CampaignNameError
+from module.logger import logger
+from module.ui.assets import EVENT_20260430_ENTRANCE_TEMP
+from module.ui.page import page_campaign_menu, page_event, page_main_white
+from module.ui_white.assets import MAIN_GOTO_CAMPAIGN_WHITE
+
+EVENT_ANIMATION = Button(area=(49, 229, 119, 400), color=(118, 215, 240), button=(49, 229, 119, 400),
+                         name='EVENT_ANIMATION')
+
+
+class CampaignBase(CampaignBase_):
+    """
+    In event Vacation Lane (event_20201126_cn), DOA collaboration, maps are:
+    Chapter 1: SP1, SP2, SP3, SP4.
+    Chapter 2: VSP.
+    Chapter 3: EX.
+    Mode switch is meaningless.
+    """
+
+    def is_event_20201126(self):
+        return self.appear(EVENT_20201126_PT_ICON, offset=(40, 20)) and self.ui_page_appear(page_event)
+
+    def ui_goto_event(self):
+        if self.is_event_20201126():
+            logger.info('Already at EVENT_20201126')
+            return True
+
+        if self.config.SERVER == 'tw':
+            self.ui_goto_main()
+            self.ui_click(EVENT_20260430_ENTRANCE_TEMP, check_button=self.is_event_20201126)
+            return True
+
+        self.ui_ensure(page_campaign_menu)
+        if self.is_event_entrance_available():
+            self.ui_goto_main()
+            if self.config.SERVER == 'tw':
+                self.ui_click(EVENT_20201126_ENTRANCE_TEMP, check_button=EVENT_20201126_PT_ICON,
+                              appear_button=MAIN_GOTO_CAMPAIGN_WHITE, offset=(40, 20))
+                return True
+
+            if self.ui_page_appear(page_main_white):
+                self.ui_click(EVENT_20201126_DETAIL_WHITE, check_button=EVENT_20201126_DETAIL_CHECK)
+            else:
+                self.ui_click(EVENT_20201126_DETAIL, check_button=EVENT_20201126_DETAIL_CHECK)
+            self.ui_click(EVENT_20201126_ENTRANCE, check_button=EVENT_20201126_PT_ICON,
+                          appear_button=EVENT_20201126_DETAIL_CHECK, offset=(40, 20))
+            return True
+
+
+    @staticmethod
+    def _campaign_separate_name(name):
+        """
+        Args:
+            name (str): Stage name in lowercase, such as 7-2, d3, sp3.
+
+        Returns:
+            tuple[str]: Campaign_name and stage index in lowercase, Such as ['7', '2'], ['d', '3'], ['sp', '3'].
+        """
+        if name == 'vsp' or name == 'sp':  # Difference
+            return 'ex_sp', '1'
+        return CampaignBase_._campaign_separate_name(name)
+
+    @staticmethod
+    def _campaign_get_chapter_index(name):
+        """
+        Args:
+            name (str, int):
+
+        Returns:
+            int
+        """
+        if isinstance(name, int):
+            return name
+        else:
+            if name.isdigit():
+                return int(name)
+            elif name in ['a', 'c', 'sp']:
+                return 1
+            elif name in ['b', 'd', 'ex_sp']:  # Difference
+                return 2
+            elif name in ['ex_ex']:  # Difference
+                return 3
+            else:
+                raise CampaignNameError
+
+    def campaign_set_chapter_event(self, chapter, mode='normal'):
+        self.ui_goto_event()
+        self.campaign_ensure_chapter(chapter)
+        return True
+
+    def campaign_get_entrance(self, name):
+        if name == 'sp':
+            name = 'vsp'
+        return super().campaign_get_entrance(name)
+
+    def is_event_animation(self):
+        """
+        Animation in events after cleared an enemy.
+
+        Returns:
+            bool: If animation appearing.
+        """
+        appear = self.appear(EVENT_ANIMATION)
+        if appear:
+            logger.info('DOA animation, waiting')
+        return appear

@@ -1,0 +1,335 @@
+"""
+私人休息室舰船互动逻辑。
+
+管理私人宿舍中与舰船角色的互动流程，包括目标房间导航、
+对话事件处理、互动按钮点击和完成状态检测。
+支持多目标舰船（安克雷奇、能代、天狼星等）的互动编排。
+
+页面s: in: PRIVATE_QUARTERS
+"""
+from module.base.timer import Timer
+from module.base.utils import random_rectangle_vector
+from module.handler.assets import POPUP_CANCEL
+from module.logger import logger
+from module.private_quarters.assets import *
+from module.ui.page import page_private_quarters
+from module.ui.ui import UI
+
+
+class PQInteract(UI):
+    # Key: str, target ship name
+    # Value: list[Button], button instances
+    #        (房间_Entrance, 页面_Locale)
+    available_targets = {
+        'anchorage': (PRIVATE_QUARTERS_SHIP_ANCHORAGE, PRIVATE_QUARTERS_PAGE_LOCALE_BEACH),
+        'noshiro': (PRIVATE_QUARTERS_SHIP_NOSHIRO, PRIVATE_QUARTERS_PAGE_LOCALE_BEACH),
+        'sirius': (PRIVATE_QUARTERS_SHIP_SIRIUS, PRIVATE_QUARTERS_PAGE_LOCALE_BEACH),
+        'new_jersey': (PRIVATE_QUARTERS_SHIP_NEW_JERSEY, PRIVATE_QUARTERS_PAGE_LOCALE_LOFT),
+        'taihou': (PRIVATE_QUARTERS_SHIP_TAIHOU, PRIVATE_QUARTERS_PAGE_LOCALE_LOFT),
+        'aegir': (PRIVATE_QUARTERS_SHIP_AEGIR, PRIVATE_QUARTERS_PAGE_LOCALE_LOFT),
+        'nakhimov': (PRIVATE_QUARTERS_SHIP_NAKHIMOV, PRIVATE_QUARTERS_PAGE_LOCALE_VILLA),
+    }
+
+    def _pq_handle_dialogue(self):
+        """
+        Handles dialogue sequence of target
+        After the addition of Taihou this sequence
+        has been discovered lagging on rare cases
+        Hence this call is used in other states
+        besides on room enter
+        """
+
+        # Helper funcs to hold off spam clicking until loading
+        # state is not present
+        def after_loading_state():
+            return not self.appear(PRIVATE_QUARTERS_LOADING_CHECK, offset=(20, 20))
+
+        def additional():
+            return True
+
+        self.ui_click(
+            click_button=PRIVATE_QUARTERS_ROOM_SAFE_CLICK_AREA,
+            check_button=PRIVATE_QUARTERS_ROOM_CHECK,
+            appear_button=after_loading_state,
+            additional=additional,
+            confirm_wait=3,
+            offset=(20, 20),
+            retry_wait=1.5
+        )
+
+    def _pq_target_appear(self):
+        """
+        Callable wrapper to validate target's appearance
+        offset=(100, 100) detectable for anchorage, noshiro, sirus, new_jersey, and taihou
+        When more ships added may need to adjust or capture specific bubble position per
+        ship, can use the available_targets to store similarly into tuples instead
+
+        Returns:
+            bool
+        """
+        settle_timer = Timer(1.5, count=3).start()
+        skip_first_screenshot = True
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            # End, success
+            if self.appear(PRIVATE_QUARTERS_ROOM_TARGET_CHECK_1, offset=(100, 100)):
+                return True
+            if self.appear(PRIVATE_QUARTERS_ROOM_TARGET_CHECK_2, offset=(100, 100)):
+                return True
+            if self.appear(PRIVATE_QUARTERS_ROOM_TARGET_CHECK_3, offset=(100, 100)):
+                return True
+
+            # End, failed expired wait time
+            if settle_timer.reached():
+                return False
+
+            if self.appear(PRIVATE_QUARTERS_ROOM_CHECK, offset=(20, 20)):
+                # Factor in couple drag up actions to
+                # counter odd default distance/zoom on target
+                p1, p2 = random_rectangle_vector(
+                    (0, -30), box=PRIVATE_QUARTERS_ROOM_SAFE_CLICK_AREA.area,
+                    random_range=(-10, -10, 10, 10), padding=5)
+                self.device.drag(p1, p2, segments=2,
+                                 shake=(0, 25), point_random=(0, 0, 0, 0),
+                                 shake_random=(0, -5, 0, 5))
+                settle_timer.reset()
+            else:
+                # Absence of check likely means dialogue is ongoing
+                self._pq_handle_dialogue()
+                settle_timer.reset()
+
+    def _pq_goto_room_seek(self, target_ship):
+        """
+        Execute seek room routine
+
+        Args:
+            target_ship (str):
+
+        Returns:
+            bool
+        """
+        target_title = target_ship.title().replace('_', ' ')
+        if target_ship not in self.available_targets:
+            logger.error(f'[私人休息室-互动] 不支持的目标舰娘: {target_title}，无法继续子任务')
+            return False
+        elif len(self.available_targets[target_ship]) < 2:
+            logger.error(f'[私人休息室-互动] 目标舰娘 {target_title} 缺少页面位置信息，无法继续子任务')
+            return False
+
+        page_btn = self.available_targets[target_ship][1]
+        logger.hr(f'[私人休息室-互动] 寻找 {target_title} 页面', level=2)
+
+        # Depending on current page position
+        # Search left then right or reverse order
+        directions = [PRIVATE_QUARTERS_PAGE_LEFT, PRIVATE_QUARTERS_PAGE_RIGHT]
+        if not self.appear(PRIVATE_QUARTERS_PAGE_LEFT, offset=(20, 20)):
+            directions.reverse()
+
+        # Execute page seek
+        skip_first_screenshot = True
+        self.interval_clear(directions)
+        settle_timer = Timer(1.5, count=3).start()
+        for direction in directions:
+            while 1:
+                if skip_first_screenshot:
+                    skip_first_screenshot = False
+                else:
+                    self.device.screenshot()
+
+                # End, success
+                if self.appear(page_btn, offset=(20, 20)):
+                    logger.info(f'[私人休息室-互动] 已到达 {target_title} 页面')
+                    return True
+
+                # Enable interval delay to confirm page after click
+                if self.appear_then_click(direction, offset=(20, 20), interval=1):
+                    settle_timer.reset()
+                    continue
+
+                # No more page clicks past interval 1
+                # Thus can safely go the other direction
+                if settle_timer.reached():
+                    break
+
+        logger.warning(f'[私人休息室-互动] 未找到 {target_title} 页面')
+        return False
+
+    def _pq_goto_room_check(self):
+        """
+        Callable wrapper for whether is loading or blocked by download asset popup
+        """
+        if self.appear(PRIVATE_QUARTERS_LOADING_CHECK, offset=(20, 20)):
+            return True
+        if self.appear(POPUP_CANCEL, offset=(20, 20)):
+            return True
+        return False
+
+    def _pq_goto_room_enter(self, target_ship):
+        """
+        Execute enter room routine
+
+        Args:
+            target_ship (str):
+
+        Returns:
+            bool
+        """
+        # Initiate goto into target's room
+        # Ensure either loading or popup
+        # prompt appears after click
+        target_title = target_ship.title().replace('_', ' ')
+        if target_ship not in self.available_targets:
+            logger.error(f'[私人休息室-互动] 不支持的目标舰娘: {target_title}，无法继续子任务')
+            return False
+        elif len(self.available_targets[target_ship]) < 1:
+            logger.error(f'[私人休息室-互动] 目标舰娘 {target_title} 缺少房间入口信息，无法继续子任务')
+            return False
+
+        target_btn = self.available_targets[target_ship][0]
+        self.ui_click(
+            click_button=target_btn,
+            check_button=self._pq_goto_room_check,
+            appear_button=page_private_quarters.check_button,
+            offset=(20, 20),
+            skip_first_screenshot=True)
+
+        # If was download asset popup
+        # Terminate the run
+        if self.handle_popup_cancel('PRIVATE_QUARTERS_DOWNLOAD_ASSET', offset=(20, 20)):
+            logger.error(f'[私人休息室-互动] 无法进入 {target_title} 的房间，请先下载所需资源')
+            return False
+
+        # Fully enter into target's room
+        # through click progression
+        self._pq_handle_dialogue()
+
+        # If target's intimacy is maxed
+        # Terminate the run
+        if self.appear(PRIVATE_QUARTERS_ROOM_TARGET_INTIMACY_MAX, offset=(20, 20)):
+            logger.warning(
+                f'[私人休息室-互动] {target_title} 好感度已满，请更换目标或关闭子任务')
+            return False
+
+        return True
+
+    def _pq_goto_room_exit(self):
+        """
+        Execute room exit routine
+        """
+        # Rare case in the middle of dialogue, so address
+        # before initiating room exit
+        if (not self.appear(PRIVATE_QUARTERS_ROOM_CHECK, offset=(20, 20)) and
+            not self.appear(PRIVATE_QUARTERS_INTERACT, offset=(-10, 0, 0, 65))):
+                self._pq_handle_dialogue()
+
+        self.interval_clear(PRIVATE_QUARTERS_ROOM_BACK)
+        self.ui_click(
+            click_button=PRIVATE_QUARTERS_ROOM_BACK,
+            check_button=page_private_quarters.check_button,
+            offset=(20, 20),
+            retry_wait=3,
+            skip_first_screenshot=True
+        )
+        self.handle_info_bar()
+
+    def pq_interact(self):
+        """
+        Execute target interact routine
+        offset=(-10, 0, 0, 65) to account for position of asset
+        top_x=-10, bottom_y=65
+        Depending on intimacy level, the asset may shift
+        Parameters identified as stable and server transparent
+        """
+        # Click target ship girl for 1st stage sequence
+        logger.hr(f'[私人休息室-互动] 互动开始', level=2)
+        interact_offset = (-10, 0, 0, 65)
+        click_timer = Timer(1.5, count=3).start()
+        skip_first_screenshot = True
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            # End
+            if self.appear(PRIVATE_QUARTERS_INTERACT, offset=interact_offset):
+                break
+
+            if click_timer.reached():
+                self.device.click(PRIVATE_QUARTERS_ROOM_TARGET_CLICK_AREA)
+                click_timer.reset()
+
+        # Repeat 2nd and 3rd stage sequence 3 times
+        for i in range(1, 4):
+            logger.hr(f'[私人休息室-互动] 互动循环 {i}/3', level=3)
+            self.interval_clear([PRIVATE_QUARTERS_INTERACT_CHECK,
+                                 PRIVATE_QUARTERS_INTERACT])
+            skip_first_screenshot = True
+            while 1:
+                if skip_first_screenshot:
+                    skip_first_screenshot = False
+                else:
+                    self.device.screenshot()
+
+                # End
+                if self.appear(PRIVATE_QUARTERS_INTERACT_CHECK, offset=(20, 20)):
+                    break
+
+                if self.appear_then_click(PRIVATE_QUARTERS_INTERACT, offset=interact_offset, interval=1):
+                    continue
+
+            skip_first_screenshot = True
+            while 1:
+                if skip_first_screenshot:
+                    skip_first_screenshot = False
+                else:
+                    self.device.screenshot()
+
+                # End
+                if self.appear(PRIVATE_QUARTERS_INTERACT, offset=interact_offset):
+                    break
+
+                if self.appear(PRIVATE_QUARTERS_INTERACT_CHECK, offset=(20, 20), interval=1):
+                    self.device.click(PRIVATE_QUARTERS_ROOM_BACK)
+                    continue
+
+        logger.hr(f'[私人休息室-互动] 互动结束', level=2)
+        self._pq_goto_room_exit()
+
+    def pq_goto_room(self, target_ship, retry=3):
+        """
+        Execute goto target's room routine
+        Try again if target absent in initial load
+        Limit to at most configured 'retry' count
+
+        Args:
+            target_ship (str):
+            retry  (int):
+
+        Returns:
+            bool
+        """
+        success = False
+        target_title = target_ship.title().replace('_', ' ')
+        logger.hr(f'[私人休息室-互动] 进入 {target_title} 房间', level=1)
+
+        if not self._pq_goto_room_seek(target_ship):
+            return success
+
+        for _ in range(retry):
+            if not self._pq_goto_room_enter(target_ship):
+                break
+
+            if self._pq_target_appear():
+                logger.info(f'[私人休息室-互动] {target_title} 正在等待你的到来！')
+                success = True
+                break
+            logger.warning(f'[私人休息室-互动] {target_title} 未就绪，退出重试; 剩余次数={retry - (_ + 1)}')
+
+            self._pq_goto_room_exit()
+
+        return success

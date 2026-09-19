@@ -1,0 +1,582 @@
+"""岛屿茶馆模块。
+
+继承 IslandShopBase，配置茶馆的商品列表与岗位参数。
+包含迎春花茶等固定位置饮品定义，支持季节性菜品、时长 OCR 与重试滑动机制。
+"""
+from module.island_teahouse.assets import *
+from module.island.island_shop_base import IslandShopBase
+from module.island.assets import *
+from module.ui.page import *
+from collections import Counter
+from datetime import timedelta
+
+from module.config.time_source import now as current_time
+from module.logger import logger
+from module.base.button import Button
+from module.exception import GameStuckError
+from module.island.island_season import SEASONAL_ITEMS
+from module.ocr.ocr import Duration, Digit
+
+
+# 固定位置按钮 — 迎春花茶使用固定坐标，不检测图标颜色，不向下滑动
+FIXED_SELECT_SPRING_FLOWER_TEA = Button(
+    area=(), color=(), button=(212, 300, 292, 360),
+    file={'cn': '', 'en': '', 'jp': '', 'tw': ''}
+)
+
+# 秋季高优先级饮品（菊花茶，槽位2）的固定位置——固定第二格（y300 行），
+# 与槽位1（胡萝卜秋梨汁，y143 行）不在同一格
+FIXED_SELECT_CHRYSANTHEMUM_TEA = Button(
+    area=(), color=(), button=(212, 300, 292, 360),
+    file={'cn': '', 'en': '', 'jp': '', 'tw': ''}
+)
+
+
+# 季节限定饮品配置（高优先级饮品走固定坐标选择：春/夏为槽位1迎春花茶/西瓜汁，
+# 秋季为槽位2菊花茶；其余槽位走常规选品流程）
+SEASONAL_DRINK_CONFIG = {
+    'spring_flower_tea': {
+        'name': 'spring_flower_tea', 'cn_name': '迎春花茶',
+        'template': TEMPLATE_WINTER_JASMINE_TEA, 'post_action': POST_WINTER_JASMINE_TEA,
+        'selection': FIXED_SELECT_SPRING_FLOWER_TEA, 'selection_check': FIXED_SELECT_SPRING_FLOWER_TEA,
+    },
+    'carrot_pear_juice': {
+        'name': 'carrot_pear_juice', 'cn_name': '胡萝卜秋梨汁',
+        'template': TEMPLATE_CARROT_PEAR_JUICE, 'post_action': POST_CARROT_PEAR_JUICE,
+        'selection': SELECT_CARROT_PEAR_JUICE, 'selection_check': SELECT_CARROT_PEAR_JUICE_CHECK,
+    },
+    'chrysanthemum_tea': {
+        'name': 'chrysanthemum_tea', 'cn_name': '菊花茶',
+        'template': TEMPLATE_CHRYSANTHEMUM_TEA, 'post_action': POST_CHRYSANTHEMUM_TEA,
+        'selection': SELECT_CHRYSANTHEMUM_TEA, 'selection_check': SELECT_CHRYSANTHEMUM_TEA_CHECK,
+    },
+    'watermelon_juice': {
+        'name': 'watermelon_juice', 'cn_name': '西瓜汁',
+        'template': TEMPLATE_WATERMELON_JUICE, 'post_action': POST_WATERMELON_JUICE,
+        'selection': SELECT_WATERMELON_JUICE, 'selection_check': SELECT_WATERMELON_JUICE_CHECK,
+    },
+    'cucumber_juice': {
+        'name': 'cucumber_juice', 'cn_name': '黄瓜汁',
+        'template': TEMPLATE_CUCUMBER_JUICE, 'post_action': POST_CUCUMBER_JUICE,
+        'selection': SELECT_CUCUMBER_JUICE, 'selection_check': SELECT_CUCUMBER_JUICE_CHECK,
+    },
+}
+
+
+class IslandTeahouse(IslandShopBase):
+    def __init__(self, config, device=None, task=None):
+        super().__init__(config=config, device=device, task=task)
+
+        # 设置店铺类型
+        self.shop_type = "teahouse"
+        self.time_prefix = "time_tea"
+        self.chef_config = self.config.IslandTeahouse_ChefFilter
+        self.post_open_retry_swipe = True
+
+        # === 初始化全局季节配置 ===
+        self._init_season_config()
+        old_seasonal_enabled = getattr(self.config, 'IslandTeahouse_Seasonal', False)
+
+        # === 根据季节确定高优先级限定饮品 ===
+        self.seasonal_high_priority_drink = None  # 对标迎春花茶/西瓜汁
+        seasonal_items = self.season_config.get_seasonal_items('teahouse') if hasattr(self, 'season_config') else []
+
+        if old_seasonal_enabled:
+            # 仅当「迎春花茶」开关开启时，才设置高优先级季节饮品
+            # 位置1饮品（对标迎春花茶）：高优先级，固定坐标点
+            if 'spring_flower_tea' in seasonal_items:
+                self.seasonal_high_priority_drink = {
+                    'name': 'spring_flower_tea', 'cn_name': '迎春花茶',
+                    'template': TEMPLATE_WINTER_JASMINE_TEA, 'post_action': POST_WINTER_JASMINE_TEA,
+                    'selection': FIXED_SELECT_SPRING_FLOWER_TEA, 'selection_check': FIXED_SELECT_SPRING_FLOWER_TEA,
+                }
+            elif 'watermelon_juice' in seasonal_items:
+                self.seasonal_high_priority_drink = {
+                    'name': 'watermelon_juice', 'cn_name': '西瓜汁',
+                    'template': TEMPLATE_WATERMELON_JUICE, 'post_action': POST_WATERMELON_JUICE,
+                    'selection': FIXED_SELECT_SPRING_FLOWER_TEA, 'selection_check': FIXED_SELECT_SPRING_FLOWER_TEA,
+                }
+            elif 'chrysanthemum_tea' in seasonal_items:
+                self.seasonal_high_priority_drink = {
+                    'name': 'chrysanthemum_tea', 'cn_name': '菊花茶',
+                    'template': TEMPLATE_CHRYSANTHEMUM_TEA, 'post_action': POST_CHRYSANTHEMUM_TEA,
+                    'selection': FIXED_SELECT_CHRYSANTHEMUM_TEA,
+                    'selection_check': FIXED_SELECT_CHRYSANTHEMUM_TEA,
+                }
+
+            if self.seasonal_high_priority_drink:
+                self.special_food = self.seasonal_high_priority_drink['name']
+                logger.info(f"[岛屿-白熊饮品] 季节高优先级饮品: {self.seasonal_high_priority_drink['cn_name']}")
+            else:
+                self.special_food = 'spring_flower_tea'
+        else:
+            logger.info("[岛屿-白熊饮品] 迎春花茶优先生产已关闭，跳过季节限定饮品")
+
+        # 设置商品列表
+        self.shop_items = []
+        # ---- 季节饮品 ----
+        if old_seasonal_enabled:
+            for item_name in seasonal_items:
+                drink = SEASONAL_DRINK_CONFIG.get(item_name)
+                if not drink:
+                    continue
+                item = drink.copy()
+                if (self.seasonal_high_priority_drink
+                        and item_name == self.seasonal_high_priority_drink['name']):
+                    # 高优先级季节饮品使用固定坐标选择（迎春花茶/西瓜汁/菊花茶）
+                    item['selection'] = self.seasonal_high_priority_drink['selection']
+                    item['selection_check'] = self.seasonal_high_priority_drink['selection_check']
+                self.shop_items.append(item)
+        # ---- 常规菜品 ----
+        self.shop_items.extend([
+            {'name': 'apple_juice', 'template': TEMPLATE_APPLE_JUICE, 'var_name': 'apple_juice',
+             'selection': SELECT_APPLE_JUICE, 'selection_check': SELECT_APPLE_JUICE_CHECK,
+             'post_action': POST_APPLE_JUICE},
+            {'name': 'banana_mango', 'template': TEMPLATE_BANANA_MANGO, 'var_name': 'banana_mango',
+             'selection': SELECT_BANANA_MANGO, 'selection_check': SELECT_BANANA_MANGO_CHECK,
+             'post_action': POST_BANANA_MANGO},
+            {'name': 'honey_lemon', 'template': TEMPLATE_HONEY_LEMON, 'var_name': 'honey_lemon',
+             'selection': SELECT_HONEY_LEMON, 'selection_check': SELECT_HONEY_LEMON_CHECK,
+             'post_action': POST_HONEY_LEMON},
+            {'name': 'strawberry_lemon', 'template': TEMPLATE_STRAWBERRY_LEMON, 'var_name': 'strawberry_lemon',
+             'selection': SELECT_STRAWBERRY_LEMON, 'selection_check': SELECT_STRAWBERRY_LEMON_CHECK,
+             'post_action': POST_STRAWBERRY_LEMON},
+            {'name': 'strawberry_honey', 'template': TEMPLATE_STRAWBERRY_HONEY, 'var_name': 'strawberry_honey',
+             'selection': SELECT_STRAWBERRY_HONEY, 'selection_check': SELECT_STRAWBERRY_HONEY_CHECK,
+             'post_action': POST_STRAWBERRY_HONEY},
+            {'name': 'floral_fruity', 'template': TEMPLATE_FLORAL_FRUITY, 'var_name': 'floral_fruity',
+             'selection': SELECT_FLORAL_FRUITY, 'selection_check': SELECT_FLORAL_FRUITY_CHECK,
+             'post_action': POST_FLORAL_FRUITY},
+            {'name': 'fruit_paradise', 'template': TEMPLATE_FRUIT_PARADISE, 'var_name': 'fruit_paradise',
+             'selection': SELECT_FRUIT_PARADISE, 'selection_check': SELECT_FRUIT_PARADISE_CHECK,
+             'post_action': POST_FRUIT_PARADISE},
+            {'name': 'lavender_tea', 'template': TEMPLATE_LAVENDER_TEA, 'var_name': 'lavender_tea',
+             'selection': SELECT_LAVENDER_TEA, 'selection_check': SELECT_LAVENDER_TEA_CHECK,
+             'post_action': POST_LAVENDER_TEA},
+            {'name': 'sunny_honey', 'template': TEMPLATE_SUNNY_HONEY, 'var_name': 'sunny_honey',
+             'selection': SELECT_SUNNY_HONEY, 'selection_check': SELECT_SUNNY_HONEY_CHECK,
+             'post_action': POST_SUNNY_HONEY},
+        ])
+        # 设置套餐组成
+        self.meal_compositions = {
+            'floral_fruity': {
+                'required': ['lavender_tea', 'apple_juice'],
+                'quantity_per': 1
+            },
+            'fruit_paradise': {
+                'required': ['banana_mango', 'strawberry_honey'],
+                'quantity_per': 1
+            },
+            'sunny_honey': {
+                'required': ['strawberry_lemon', 'honey_lemon'],
+                'quantity_per': 1
+            }
+        }
+
+        # 设置岗位按钮
+        self.post_buttons = {
+            'ISLAND_TEAHOUSE_POST1': ISLAND_TEAHOUSE_POST1,
+            'ISLAND_TEAHOUSE_POST2': ISLAND_TEAHOUSE_POST2
+        }
+
+        # 设置筛选资产
+        self.filter_asset = 'teahouse'
+
+        # 设置配置前缀（更新为4个参数，删除任务相关配置）
+        self.setup_config(
+            config_meal_prefix="IslandTeahouse_Meal",
+            config_number_prefix="IslandTeahouse_MealNumber",
+            config_away_cook="IslandTeahouseNextTask_AwayCook",
+            config_post_number="IslandTeahouse_PostNumber"
+        )
+
+        # === 季节餐品自动切换 ===
+        # 若用户在 Meal 中配置了春季限定餐品（pineapple_juice），
+        # 但当前季节不是 spring，则自动替换为当前季节对应槽位的餐品
+        self._auto_switch_seasonal_meals()
+
+        # === 补充季节饮品注册 ===
+        # “迎春花茶优先生产”关闭（默认）时，季节饮品不会进入 shop_items，
+        # 若用户又在餐品槽位中手动配置了季节饮品（如胡萝卜秋梨汁/菊花茶），
+        # 排产时 name_to_config 缺键会抛 KeyError 并触发重启。
+        # 这里把用户实际配置、且有真实选品资源的季节饮品补注册到商品列表；
+        # 迎春花茶走“迎春花茶优先生产”的固定坐标流程，不在此补注册。
+        for meal_name, _ in self.post_products:
+            drink = SEASONAL_DRINK_CONFIG.get(meal_name)
+            if not drink or not drink['selection'].area:
+                continue
+            if not any(item['name'] == meal_name for item in self.shop_items):
+                self.shop_items.append(drink.copy())
+
+        # 特殊材料：蜂蜜（仅用于库存检查和限制，不再有强制消耗任务）
+        self.fresh_honey = 0
+        self.initialize_shop()
+
+    def _auto_switch_seasonal_meals(self):
+        """
+        自动切换用户配置中的春季限定餐品到当前季节对应餐品。
+        迎春花茶(spring_flower_tea) -> 春季保持，夏季切换为西瓜汁(watermelon_juice)，
+        秋季切换为胡萝卜秋梨汁(carrot_pear_juice)。
+        鲜榨菠萝汁(pineapple_juice) -> 春季保持，夏季切换为黄瓜汁(cucumber_juice)，
+        秋季切换为菊花茶(chrysanthemum_tea)。
+        """
+        SEASONAL_TEAHOUSE_SWITCH = {
+            'spring_flower_tea': 0,  # 迎春花茶 -> 槽位0
+            'pineapple_juice': 1,    # 鲜榨菠萝汁 -> 槽位1
+        }
+        CN_NAMES = {
+            'spring_flower_tea': '迎春花茶',
+            'pineapple_juice': '鲜榨菠萝汁',
+        }
+        if not hasattr(self, 'season_config') or not self.season_config:
+            return
+        current_season = self.season_config.season
+        current_teahouse_items = SEASONAL_ITEMS.get(current_season, {}).get('teahouse', [])
+        for spring_item, slot_idx in SEASONAL_TEAHOUSE_SWITCH.items():
+            if not any(name == spring_item for name, _ in self.post_products):
+                continue
+            cn_name = CN_NAMES.get(spring_item, spring_item)
+            if slot_idx < len(current_teahouse_items):
+                seasonal_item = current_teahouse_items[slot_idx]
+                if seasonal_item != spring_item:
+                    self.post_products = [
+                        (seasonal_item, target) if name == spring_item else (name, target)
+                        for name, target in self.post_products
+                    ]
+                    logger.info(
+                        f"季节餐品自动切换: {self._item_cn(spring_item)}({cn_name}) -> {self._item_cn(seasonal_item)}"
+                        f"（当前季节: {self.season_config.season_name}）"
+                    )
+            else:
+                self.post_products = [
+                    (name, target) for name, target in self.post_products
+                    if name != spring_item
+                ]
+                logger.info(
+                    f"季节餐品自动移除: {self._item_cn(spring_item)}({cn_name})"
+                    f"（{self.season_config.season_name} 无对应槽位的季节餐品）"
+                )
+
+    def get_warehouse_counts(self):
+        """覆盖：获取仓库数量，包括蜂蜜"""
+        # 先调用父类方法获取基础库存
+        super().get_warehouse_counts()
+
+        # 额外获取蜂蜜数量（用于库存限制）
+        self.warehouse_filter('basic','other_from')
+        image = self.device.screenshot()
+        self.fresh_honey = self.ocr_item_quantity(image, TEMPLATE_FRESH_HONEY)
+        logger.info(f"[岛屿-白熊饮品] 蜂蜜数量: {self.fresh_honey}")
+
+        # 将蜂蜜库存存入warehouse_counts，便于统一处理
+        self.warehouse_counts['fresh_honey'] = self.fresh_honey
+
+        return self.warehouse_counts
+
+    def check_special_materials(self, product, batch_size):
+        """覆盖：检查特殊材料（蜂蜜）限制。
+
+        蜂蜜只用于制作蜂蜜柠檬水（每 1 个）与草莓蜂蜜冰沙（每 4 个），
+        不直接参与阳光蜜水等套餐；套餐原料由父类按套餐组成检查。
+        """
+        if batch_size <= 0:
+            return 0
+
+        # 蜂蜜柠檬水需要 1 个蜂蜜
+        if product == 'honey_lemon':
+            max_by_honey = min(batch_size, self.fresh_honey)
+            return max_by_honey
+
+        # 草莓蜂蜜冰沙需要 4 个蜂蜜
+        if product == 'strawberry_honey':
+            max_by_honey = min(batch_size, self.fresh_honey // 4)
+            return max_by_honey
+
+        return batch_size
+
+    def post_produce(self, post_id, product, number, time_var_name, product2=None):
+        """
+        覆盖父类 post_produce：
+        季节高优先级饮品（迎春花茶/西瓜汁等）：点击岗位 → ISLAND_POST_SELECT进入选择 → 处理选人 → 点击固定坐标。
+        不调用父类select_product（跳过图像匹配和滑动）。
+        其他餐品走父类逻辑。
+        """
+        seasonal_drink_name = self.seasonal_high_priority_drink['name'] if self.seasonal_high_priority_drink else ''
+        if product == seasonal_drink_name:
+            post_button = self.posts[post_id]['button']
+            self.post_close()
+            self.post_open(post_button)
+            self.device.sleep(0.5)
+            time_work = Duration(ISLAND_WORKING_TIME)
+            # 进入商品选择界面（处理选人 + 选商品）
+            for _ in self.loop(timeout=120, skip_first=False):
+                if self.appear(ISLAND_SELECT_CHARACTER_CHECK, offset=1):
+                    # 选择厨师
+                    if self.select_character(character_list=self.chef_config):
+                        if not self.confirm_selected_character(f"{product}生产派遣"):
+                            self.back_to_postmanage_from_dispatch()
+                            return 0
+                    else:
+                        logger.warning(f"[岛屿-白熊饮品] {self._item_cn(product)}生产派遣无可用角色: {self.chef_config}")
+                        self.back_to_postmanage_from_dispatch()
+                        return 0
+                    continue
+                if self.appear(ISLAND_SELECT_PRODUCT_CHECK, offset=1):
+                    # 在商品列表界面，点击固定位置，不检测图标
+                    self.device.click(self.seasonal_high_priority_drink['selection'])
+                    break
+                # 点击进入选择
+                if self.appear_then_click(ISLAND_POST_SELECT, offset=1):
+                    continue
+            else:
+                raise GameStuckError(f"{self._item_cn(product)}生产派遣流程超时")
+            # 检查材料并下单
+            if self.produce_check():
+                logger.warning(f"[岛屿-白熊饮品] 原料不足，无法生产 {self._item_cn(product)}")
+                self.device.click(ISLAND_BACK)
+                self.device.sleep(0.5)
+                return 0
+            else:
+                self.post_add_one(number - 1)
+                self.device.sleep(0.5)
+                self.device.click(POST_ADD_ORDER)
+                self.device.sleep(0.5)
+            self.wait_until_appear(ISLAND_POSTMANAGE_CHECK)
+            self.device.sleep(0.5)
+            logger.info(post_button)
+            self.post_open(post_button)
+            self.device.sleep(0.5)
+            image = self.device.screenshot()
+            ocr_post_number = Digit(OCR_POST_NUMBER, letter=(57, 58, 60), threshold=100,
+                                    alphabet='0123456789')
+            actual_number = ocr_post_number.ocr(image)
+            time_value = time_work.ocr(self.device.image)
+            finish_time = current_time() + time_value
+            setattr(self, time_var_name, finish_time)
+            self.posts[post_id]['status'] = 'working'
+            self.deduct_materials(product, actual_number)
+            logger.info(f"[岛屿-白熊饮品] 已安排生产：{self._item_cn(product)} x{actual_number}")
+            self.post_close()
+            return actual_number
+
+        return super().post_produce(post_id, product, number, time_var_name, product2)
+
+    def run(self):
+        """
+        覆盖父类的run方法，实现迎春花茶的优先级控制：
+        迎春花茶为最高优先级，在基础需求前单独生产。
+        其他逻辑沿用父类流程。
+        """
+        self.island_error = False
+        self.goto_postmanage()
+        self.post_manage_mode(POST_MANAGE_PRODUCTION)
+        self.post_close()
+        self.post_manage_swipe(self.post_manage_swipe_count)
+
+        # 检查岗位状态
+        post_count = getattr(self.config, self.config_post_number, 2)
+        time_vars = []
+        for i in range(post_count):
+            time_var_name = f'{self.time_prefix}{i + 1}'
+            time_vars.append(time_var_name)
+            setattr(self, time_var_name, None)
+            post_id = f'ISLAND_{self.shop_type.upper()}_POST{i + 1}'
+            self.post_check(post_id, time_var_name)
+
+        # 获取空闲岗位
+        idle_posts = self.get_idle_posts()
+
+        if idle_posts:
+            self.get_warehouse_counts()
+            self.goto_postmanage()
+            self.post_manage_mode(POST_MANAGE_PRODUCTION)
+            self.post_close()
+            self.post_manage_swipe(self.post_manage_swipe_count)
+
+            # 计算当前总库存
+            self.current_totals = self._rebuild_current_totals({})
+
+            # ============ 调试信息 ============
+            logger.info(f"[岛屿-白熊饮品] === 调试信息 ===")
+            logger.info(f"[岛屿-白熊饮品] 仓库库存: {self._inv_cn(self.warehouse_counts)}")
+            logger.info(f"[岛屿-白熊饮品] 生产中库存: {self._inv_cn(self.post_check_meal)}")
+            logger.info(f"[岛屿-白熊饮品] 当前总库存: {self._inv_cn(self.current_totals)}")
+            logger.info(f"[岛屿-白熊饮品] 基础需求配置（共{len(self.post_products)}个槽位）: {self._products_cn(self.post_products)}")
+            logger.info("===============")
+
+            self._compute_base_demands()
+
+            logger.info(f"[岛屿-白熊饮品] 待完成备餐: {self._inv_cn(self.to_post_products)}")
+            logger.info(f"[岛屿-白熊饮品] 当前剩余库存: {self._inv_cn(self.current_totals)}")
+
+            # ============ 处理套餐分解 ============
+            if self.to_post_products:
+                self.to_post_products = self.process_meal_requirements(self.to_post_products)
+                logger.info(f"[岛屿-白熊饮品] 基础需求生产计划: {self._inv_cn(self.to_post_products)}")
+
+            # ================================================================
+            #  阶段：高优先级季节饮品（受「迎春花茶」开关控制）
+            #  开关开启时：在基础需求之前单独生产季节饮品，确保最高优先级
+            #  开关关闭时：直接进入基础需求生产
+            # ================================================================
+            if self.seasonal_high_priority_drink:
+                drink_name = self.seasonal_high_priority_drink['name']
+                drink_cn = self.seasonal_high_priority_drink['cn_name']
+                logger.info(f"[岛屿-白熊饮品] 阶段：高优先级季节饮品 — {drink_cn}")
+                temp_products = self.to_post_products.copy()
+                self.to_post_products = {drink_name: self.POST_PRODUCE_LIMIT}
+                logger.info(f"[岛屿-白熊饮品] 单独安排{drink_cn}生产: {self._inv_cn(self.to_post_products)}")
+
+                self.schedule_production()
+
+                # 恢复剩余的基础需求生产计划
+                self.to_post_products = temp_products
+                logger.info(f"[岛屿-白熊饮品] 剩余基础需求生产计划: {self._inv_cn(self.to_post_products)}")
+            else:
+                logger.info("[岛屿-白熊饮品] 迎春花茶优先生产已关闭，直接处理基础需求")
+
+            # ============ 安排基础需求生产（循环直到无空岗或无缺口） ============
+            _produced_pass = {}
+            _force_skip_run = set()
+            _loop_count = 0
+
+            self._schedule_and_track(_produced_pass)
+
+            while self.get_idle_posts():
+                _loop_count += 1
+                if _loop_count > self._MAX_FILL_LOOP:
+                    logger.warning(f"[岛屿-白熊饮品] [循环] 已达最大迭代次数 {self._MAX_FILL_LOOP}，强制退出")
+                    break
+                self.current_totals = self._rebuild_current_totals(_produced_pass)
+
+                self._compute_base_demands(force_skip=_force_skip_run)
+                if not self.to_post_products:
+                    logger.info("[岛屿-白熊饮品] 所有槽位需求已满足")
+                    break
+
+                self.to_post_products = self.process_meal_requirements(self.to_post_products)
+                logger.info(f"[岛屿-白熊饮品] 基础需求生产计划: {self._inv_cn(self.to_post_products)}")
+
+                prev_pass_total = sum(_produced_pass.values())
+                self._schedule_and_track(_produced_pass)
+
+                if sum(_produced_pass.values()) == prev_pass_total and self.to_post_products:
+                    logger.info("[岛屿-白熊饮品] [循环] 当前缺口排产失败，切换严格模式扫描")
+
+                    self.to_post_products = {}
+                    self.current_totals = self._rebuild_current_totals(_produced_pass)
+                    self._compute_base_demands(check_materials=True)
+                    if not self.to_post_products:
+                        break
+                    self.to_post_products = self.process_meal_requirements(self.to_post_products)
+                    logger.info(f"[岛屿-白熊饮品] 基础需求生产计划（严格模式）: {self._inv_cn(self.to_post_products)}")
+
+                    strict_prev_total = sum(_produced_pass.values())
+                    self._schedule_and_track(_produced_pass)
+
+                    if sum(_produced_pass.values()) == strict_prev_total and self.to_post_products:
+                        stuck_now = set(self.to_post_products.keys())
+                        logger.info(f"[岛屿-白熊饮品] [循环] 严格模式也无产出，强制跳过: {sorted(self._item_cn(k) for k in stuck_now)}")
+                        _force_skip_run.update(stuck_now)
+                        self.to_post_products = {}
+                    continue
+
+            # ============ 检查是否还有空闲岗位，安排特殊餐品或常驻餐品 ============
+            idle_posts_after_basic = self.get_idle_posts()
+            away_cook = getattr(self.config, self.config_away_cook, None)
+            has_away_cook = (away_cook and away_cook != "None" and
+                             away_cook in self.name_to_config)
+
+            if idle_posts_after_basic and has_away_cook:
+                logger.info(f"[岛屿-白熊饮品] 基础需求完成后，还有 {len(idle_posts_after_basic)} 个空闲岗位")
+                for post_id in idle_posts_after_basic:
+                    post_num = post_id[-1]
+                    time_var_name = f'{self.time_prefix}{post_num}'
+                    logger.info(f"[岛屿-白熊饮品] 尝试生产常驻餐品 {self._item_cn(away_cook)}")
+                    batch_size = self.POST_PRODUCE_LIMIT
+                    batch_size = self.get_max_producible(away_cook, batch_size)
+                    if batch_size > 0:
+                        result = self.post_produce(
+                            post_id, product=away_cook, number=batch_size,
+                            time_var_name=time_var_name
+                        )
+                        if result == 0:
+                            logger.info(f"[岛屿-白熊饮品] 常驻餐品 {self._item_cn(away_cook)} 原料不足，保持岗位空闲")
+                            break
+                        else:
+                            logger.info(f"[岛屿-白熊饮品] 已为岗位 {post_id} 安排常驻餐品 {self._item_cn(away_cook)} x{batch_size}")
+                    else:
+                        logger.info(f"[岛屿-白熊饮品] 生产 {self._item_cn(away_cook)} 的材料不足，跳过岗位 {post_id}")
+                        break
+            elif idle_posts_after_basic:
+                logger.info(f"[岛屿-白熊饮品] 有 {len(idle_posts_after_basic)} 个空闲岗位，但未设置常驻餐品，保持空闲")
+
+        # ============ 设置任务延迟 ============
+        finish_times = []
+        for var in time_vars:
+            time_value = getattr(self, var)
+            if time_value is not None:
+                finish_times.append(time_value)
+        hours_later = current_time() + timedelta(hours=6)
+        finish_times.append(hours_later)
+        finish_times.sort()
+        self.config.task_delay(target=finish_times)
+        if self.island_error:
+            from module.exception import GameBugError
+            raise GameBugError("检测到岛屿ERROR1，需要重启")
+
+    def deduct_materials(self, product, number):
+        """覆盖：扣除前置材料（蜂蜜柠檬水与草莓蜂蜜冰沙消耗蜂蜜）"""
+        # 先调用父类方法扣除套餐原材料
+        super().deduct_materials(product, number)
+
+        # 蜂蜜柠檬水需要 1 个蜂蜜
+        if product == 'honey_lemon':
+            deducted = min(number, self.fresh_honey)
+            self.fresh_honey = max(0, self.fresh_honey - number)
+            if 'fresh_honey' in self.warehouse_counts:
+                self.warehouse_counts['fresh_honey'] = self.fresh_honey
+            logger.info(f"[岛屿-白熊饮品] 扣除蜂蜜：{self._item_cn('fresh_honey')} -{deducted} (用于制作{self._item_cn('honey_lemon')})")
+
+        # 草莓蜂蜜冰沙需要 4 个蜂蜜
+        if product == 'strawberry_honey':
+            deducted = min(number * 4, self.fresh_honey)
+            self.fresh_honey = max(0, self.fresh_honey - number * 4)
+            if 'fresh_honey' in self.warehouse_counts:
+                self.warehouse_counts['fresh_honey'] = self.fresh_honey
+            logger.info(f"[岛屿-白熊饮品] 扣除蜂蜜：{self._item_cn('fresh_honey')} -{deducted} (用于制作{self._item_cn('strawberry_honey')})")
+
+    def apply_special_material_constraints(self, requirements):
+        """覆盖：根据蜂蜜库存调整需求。
+
+        蜂蜜只用于蜂蜜柠檬水（每 1 个）与草莓蜂蜜冰沙（每 4 个）；
+        两者按顺序共享蜂蜜：先满足蜂蜜柠檬水，剩余蜂蜜再分配给草莓蜂蜜冰沙。
+        阳光蜜水的原料（草莓蜜沁 + 蜂蜜柠檬水）由基类套餐需求分解处理。
+        """
+        result = requirements.copy()
+        remaining_honey = self.fresh_honey
+
+        # 处理蜂蜜柠檬水的需求（每 1 个蜂蜜）
+        if 'honey_lemon' in result and result['honey_lemon'] > 0:
+            honey_lemon_needed = result['honey_lemon']
+            max_honey_lemon = min(honey_lemon_needed, remaining_honey)
+            if max_honey_lemon < honey_lemon_needed:
+                logger.info(f"[岛屿-白熊饮品] 蜂蜜不足：{self._item_cn('honey_lemon')}需求从{honey_lemon_needed}调整为{max_honey_lemon}")
+            result['honey_lemon'] = max_honey_lemon
+            remaining_honey -= max_honey_lemon
+
+        # 处理草莓蜂蜜冰沙的需求（每 4 个蜂蜜）
+        if 'strawberry_honey' in result and result['strawberry_honey'] > 0:
+            strawberry_honey_needed = result['strawberry_honey']
+            max_strawberry_honey = min(strawberry_honey_needed, remaining_honey // 4)
+            if max_strawberry_honey < strawberry_honey_needed:
+                logger.info(f"[岛屿-白熊饮品] 蜂蜜不足：{self._item_cn('strawberry_honey')}需求从{strawberry_honey_needed}调整为{max_strawberry_honey}")
+            result['strawberry_honey'] = max_strawberry_honey
+
+        return result
+
+
+if __name__ == "__main__":
+    az = IslandTeahouse('alas', task='Alas')
+    az.device.screenshot()
+    az.run()

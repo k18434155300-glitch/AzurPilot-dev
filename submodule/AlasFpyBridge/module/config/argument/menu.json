@@ -1,0 +1,42 @@
+{
+  "Fpy": {
+    "menu": "list",
+    "page": "setting",
+    "tasks": [
+      "Fpy",
+      "FpyHeartbeat"
+    ]
+  },
+  "FpyFarm": {
+    "menu": "list",
+    "page": "setting",
+    "tasks": [
+      "FpyMain"
+    ]
+  },
+  "FpyDaily": {
+    "menu": "list",
+    "page": "setting",
+    "tasks": [
+      "FpyDailyFpSummon",
+      "FpyDailyStorySummon",
+      "FpyDailyQuest"
+    ]
+  },
+  "FpyWeekly": {
+    "menu": "list",
+    "page": "setting",
+    "tasks": [
+      "FpyWeeklyMission"
+    ]
+  },
+  "FpyTool": {
+    "menu": "list",
+    "page": "tool",
+    "tasks": [
+      "FpyBattle",
+      "FpyBenchmark",
+      "FpyCall"
+    ]
+  }
+}

@@ -1,0 +1,333 @@
+"""基准测试模块。
+
+用于评估设备性能，包括截图速度、图像处理速度和战斗效率。
+使用 Rich 表格输出测试结果，帮助用户选择最佳的截图后端配置。
+"""
+
+import time
+import typing as t
+
+import numpy as np
+from rich.table import Table
+from rich.text import Text
+
+from module.base.utils import float2str as float2str_
+from module.base.utils import random_rectangle_point
+from module.campaign.campaign_ui import CampaignUI
+from module.daemon.daemon_base import DaemonBase
+from module.exception import RequestHumanTakeover
+from module.logger import logger
+
+
+def float2str(n, decimal=3):
+    """将数值转换为带 's' 后缀的时间字符串。
+
+    Args:
+        n: 待转换的数值，非数值类型直接转字符串。
+        decimal: 小数位数，默认保留 3 位。
+
+    Returns:
+        str: 格式化后的时间字符串，如 '0.319s'。
+    """
+    if not isinstance(n, (float, int)):
+        return str(n)
+    else:
+        return float2str_(n, decimal=decimal) + 's'
+
+
+class Benchmark(DaemonBase, CampaignUI):
+    TEST_TOTAL = 15
+    TEST_BEST = int(TEST_TOTAL * 0.8)
+
+    def benchmark_test(self, func, *args, quiet=False, **kwargs):
+        """对指定函数执行多次基准测试，返回平均耗时。
+
+        连续调用 func TEST_TOTAL 次，去掉最慢的 20% 结果后取平均值。
+        若中途出现 RequestHumanTakeover 或其他异常则立即返回 'Failed'。
+
+        Args:
+            func: 待测试的函数。
+            *args: 传递给 func 的位置参数。
+            quiet: 为 True 时（auto 探测路径）探测失败只打一行警告，
+                不打印整段 traceback——某个候选后端在当前设备不可用（如
+                Android 15 上 atx-agent 截屏受限）是预期情况，不应制造恐慌。
+            **kwargs: 传递给 func 的关键字参数。
+
+        Returns:
+            float: 去除异常值后的平均耗时（秒），失败时返回 'Failed'。
+
+        Raises:
+            RequestHumanTakeover: 不捕获此异常，直接向上抛出。
+        """
+        logger.hr(f'基准测试', level=2)
+        logger.info(f'测试函数: {func.__name__}')
+        record = []
+
+        for n in range(1, self.TEST_TOTAL + 1):
+            start = time.perf_counter()
+
+            try:
+                func(*args, **kwargs)
+            except RequestHumanTakeover:
+                logger.critical('[Daemon] 错误 请求人类接管')
+                logger.warning(f'[Daemon] 基准测试失败，函数: {func.__name__}')
+                return 'Failed'
+            except Exception as e:
+                if quiet:
+                    logger.warning(
+                        f'[守护-基准测试] {func.__name__}() 探测失败，跳过该候选后端: '
+                        f'{type(e).__name__}: {e}'
+                    )
+                else:
+                    logger.exception(e)
+                logger.warning(f'[Daemon] 基准测试失败，函数: {func.__name__}')
+                return 'Failed'
+
+            cost = time.perf_counter() - start
+            logger.attr(
+                f'{str(n).rjust(2, "0")}/{self.TEST_TOTAL}',
+                f'{float2str(cost)}'
+            )
+            record.append(cost)
+
+        logger.info('基准测试完成')
+        average = float(np.mean(np.sort(record)[:self.TEST_BEST]))
+        logger.info(f'[守护-基准测试] 耗时 {float2str(average)} (最优 {self.TEST_BEST} 次，共 {self.TEST_TOTAL} 次测试)')
+        return average
+
+    @staticmethod
+    def evaluate_screenshot(cost):
+        """根据截图耗时评估速度等级，返回带颜色样式的 Rich Text。
+
+        Args:
+            cost: 截图耗时（秒），非数值时表示失败。
+
+        Returns:
+            Text: 带颜色标签的速度描述文本。
+        """
+        if not isinstance(cost, (float, int)):
+            return Text(cost, style="bold bright_red")
+
+        if cost < 0.025:
+            return Text('Insane Fast', style="bold bright_green")
+        if cost < 0.100:
+            return Text('Ultra Fast', style="bold bright_green")
+        if cost < 0.200:
+            return Text('Very Fast', style="bright_green")
+        if cost < 0.300:
+            return Text('Fast', style="green")
+        if cost < 0.500:
+            return Text('Medium', style="yellow")
+        if cost < 0.750:
+            return Text('Slow', style="red")
+        if cost < 1.000:
+            return Text('Very Slow', style="bright_red")
+        return Text('Ultra Slow', style="bold bright_red")
+
+    @staticmethod
+    def evaluate_click(cost):
+        """根据点击耗时评估速度等级，返回带颜色样式的 Rich Text。
+
+        Args:
+            cost: 点击耗时（秒），非数值时表示失败。
+
+        Returns:
+            Text: 带颜色标签的速度描述文本。
+        """
+        if not isinstance(cost, (float, int)):
+            return Text(cost, style="bold bright_red")
+
+        if cost < 0.100:
+            return Text('Fast', style="bright_green")
+        if cost < 0.200:
+            return Text('Medium', style="yellow")
+        if cost < 0.400:
+            return Text('Slow', style="red")
+        return Text('Very Slow', style="bright_red")
+
+    @staticmethod
+    def show(test, data, evaluate_func):
+        """以表格形式展示基准测试结果。
+
+        输出示例:
+            +--------------+--------+--------+
+            |  Screenshot  |  time  | Speed  |
+            +--------------+--------+--------+
+            |     ADB      | 0.319s |  Fast  |
+            | uiautomator2 | 0.476s | Medium |
+            |  aScreenCap  | Failed | Failed |
+            +--------------+--------+--------+
+
+        Args:
+            test: 表格第一列的标题名称。
+            data: 测试结果列表，每项为 [方法名, 耗时]。
+            evaluate_func: 耗时评估函数，返回带颜色的 Rich Text。
+        """
+        table = Table(show_lines=True)
+        table.add_column(
+            test, header_style="bright_cyan", style="cyan", no_wrap=True
+        )
+        table.add_column("Time", style="magenta")
+        table.add_column("Speed", style="green")
+        for row in data:
+            table.add_row(
+                row[0],
+                float2str(row[1]),
+                evaluate_func(row[1]),
+            )
+        logger.print(table, justify='center')
+
+    def benchmark(self, screenshot: t.Tuple[str] = (), click: t.Tuple[str] = (), quiet: bool = False):
+        """执行截图和点击方法的基准测试，返回各自最快的方法。
+
+        Args:
+            screenshot: 待测试的截图方法名称元组。
+            click: 待测试的点击方法名称元组。
+            quiet: 传给 ``benchmark_test``，auto 探测路径为 True，失败静默降级。
+
+        Returns:
+            tuple: (最快截图方法, 最快点击方法)。
+        """
+        logger.hr('基准测试', level=1)
+        logger.info(f'测试截图方式: {screenshot}')
+        logger.info(f'测试点击方式: {click}')
+
+        screenshot_result = []
+        for method in screenshot:
+            result = self.benchmark_test(self.device.screenshot_methods[method], quiet=quiet)
+            screenshot_result.append([method, result])
+
+        area = (124, 4, 649, 106)  # 屏幕上可安全点击的区域
+        click_result = []
+        for method in click:
+            x, y = random_rectangle_point(area)
+            result = self.benchmark_test(self.device.click_methods[method], x, y, quiet=quiet)
+            click_result.append([method, result])
+
+        def compare(res):
+            res = res[1]
+            if not isinstance(res, (int, float)):
+                return 100
+            else:
+                return res
+
+        logger.hr('基准测试结果', level=1)
+        fastest_screenshot = 'ADB_nc'
+        fastest_click = 'minitouch'
+        if screenshot_result:
+            self.show(test='Screenshot', data=screenshot_result, evaluate_func=self.evaluate_screenshot)
+            fastest = sorted(screenshot_result, key=lambda item: compare(item))[0]
+            logger.info(f'推荐截图方式: {fastest[0]} ({float2str(fastest[1])})')
+            fastest_screenshot = fastest[0]
+        if click_result:
+            self.show(test='Control', data=click_result, evaluate_func=self.evaluate_click)
+            fastest = sorted(click_result, key=lambda item: compare(item))[0]
+            # 如果 minitouch 和 MaaTouch 都是最快的，优先选择 MaaTouch；
+            # nemu_ipc 触控有兼容性风险，不作推荐，同为最快时也让位 MaaTouch
+            if 'MaaTouch' in click and fastest[0] in ('minitouch', 'nemu_ipc'):
+                fastest[0] = 'MaaTouch'
+            logger.info(f'推荐控制方式: {fastest[0]} ({float2str(fastest[1])})')
+            fastest_click = fastest[0]
+
+        return fastest_screenshot, fastest_click
+
+    def get_test_methods(self) -> t.Tuple[t.Tuple[str], t.Tuple[str]]:
+        """根据设备类型和 SDK 版本，筛选出可用的截图和点击测试方法。
+
+        Returns:
+            tuple: (可用截图方法元组, 可用点击方法元组)。
+        """
+        device = self.config.Benchmark_DeviceType
+        screenshot = ['ADB', 'ADB_nc', 'uiautomator2', 'aScreenCap', 'aScreenCap_nc', 'DroidCast', 'DroidCast_raw']
+        click = ['ADB', 'uiautomator2', 'minitouch', 'MaaTouch']
+
+        def remove(*args):
+            return [l for l in screenshot if l not in args]
+
+        # Android > 9 不支持 aScreenCap
+        sdk = self.device.sdk_ver
+        logger.info(f'sdk_ver: {sdk}')
+        if not (21 <= sdk <= 28):
+            screenshot = remove('aScreenCap', 'aScreenCap_nc')
+        # 云手机不支持 nc 本地回环
+        if device in ['plone_cloud_with_adb']:
+            screenshot = remove('ADB_nc', 'aScreenCap_nc')
+        # VMOS 虚拟机仅支持部分方法
+        if device == 'android_phone_vmos':
+            screenshot = ['ADB', 'aScreenCap', 'DroidCast', 'DroidCast_raw']
+            click = ['ADB', 'Hermit', 'MaaTouch']
+        # DroidCast 仅支持 SDK 23 (Android 6.0) 到 SDK 32 (Android 12)
+        if not (23 <= sdk <= 32):
+            screenshot = remove('DroidCast', 'DroidCast_raw')
+
+        if self.device.nemu_ipc_available():
+            screenshot.append('nemu_ipc')
+            # nemu_ipc 也实现了点击（Control.click_methods 已注册），完整基准测试
+            # 中展示其成绩供参考；自动选择路径（run_simple_screenshot_benchmark）
+            # 不包含 nemu_ipc，不会自动启用
+            click.append('nemu_ipc')
+        if self.device.ldopengl_available():
+            screenshot.append('ldopengl')
+        if self.device.is_bluestacks_air:
+            screenshot = [l for l in screenshot if 'DroidCast' not in l]
+
+        scene = self.config.Benchmark_TestScene
+        if 'screenshot' not in scene:
+            screenshot = []
+        if 'click' not in scene:
+            click = []
+
+        return tuple(screenshot), tuple(click)
+
+    def run(self):
+        self.config.override(Emulator_ScreenshotMethod='ADB')
+        self.device.uninstall_minicap()
+        self.ensure_campaign_ui('7-2', mode='normal')
+
+        logger.attr('设备类型', self.config.Benchmark_DeviceType)
+        logger.attr('测试场景', self.config.Benchmark_TestScene)
+        screenshot, click = self.get_test_methods()
+        self.benchmark(screenshot, click)
+
+    def run_simple_screenshot_benchmark(self):
+        """执行简化版截图基准测试，仅测试 3 次取最优结果。
+
+        用于快速确定当前设备最快的截图方法，测试次数少于完整基准测试。
+
+        Returns:
+            str: 当前设备最快的截图方法名称。
+        """
+        screenshot = ['ADB', 'ADB_nc', 'uiautomator2', 'aScreenCap', 'aScreenCap_nc', 'DroidCast', 'DroidCast_raw']
+
+        def remove(*args):
+            return [l for l in screenshot if l not in args]
+
+        sdk = self.device.sdk_ver
+        logger.info(f'sdk_ver: {sdk}')
+        if not (21 <= sdk <= 28):
+            screenshot = remove('aScreenCap', 'aScreenCap_nc')
+        if self.device.is_chinac_phone_cloud:
+            screenshot = remove('ADB_nc', 'aScreenCap_nc')
+        # 注意：nemu_ipc 不参与自动选择（速度虽快但触控有兼容性风险），
+        # 仅在完整基准测试（get_test_methods）中展示成绩，由用户手动决定是否启用
+        if self.device.ldopengl_available():
+            screenshot.append('ldopengl')
+        screenshot = tuple(screenshot)
+
+        self.TEST_TOTAL = 3
+        self.TEST_BEST = 1
+        # quiet=True：auto 自动选路是"挑最快的可用后端"，探测失败的后端
+        # （如 Android 15 上 uiautomator2 截屏受限）本就会被排名淘汰，
+        # 无需在每次启动时打印整段 traceback 吓人。
+        method, _ = self.benchmark(screenshot, tuple(), quiet=True)
+
+        return method
+
+
+def run_benchmark(config):
+    try:
+        Benchmark(config, task='Benchmark').run()
+        return True
+    except RequestHumanTakeover:
+        logger.critical('[Daemon] 错误 请求人类接管')
+        return False
