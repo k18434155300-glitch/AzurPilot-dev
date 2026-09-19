@@ -2099,6 +2099,53 @@ class AzurLaneAutoScript:
         AzurLaneConfig.is_hoarding_task = False
         return task.command
 
+    # --------------------------------------------------------- 抢占式调度
+
+    def _prepare_preemption(self, task):
+        """为即将执行的任务装配抢占控制器。
+
+        总开关关闭时不向设备注入任何钩子，行为与改动前完全一致。
+
+        Returns:
+            PreemptionController | None: 未启用时返回 None。
+        """
+        if self.__dict__.get('device') is None:
+            return None
+        try:
+            from module.runtime.preemption import PreemptionController
+        except Exception as e:
+            logger.warning(f'[抢占] 控制器加载失败，本轮不启用: {e}')
+            return None
+        try:
+            controller = PreemptionController(self.config)
+        except Exception as e:
+            logger.warning(f'[抢占] 控制器初始化失败，本轮不启用: {e}')
+            return None
+        if not controller.enabled:
+            return None
+        controller.bind(task)
+        # device 是 cached_property，此处已在 __dict__ 中，赋值不会触发重新初始化
+        self.__dict__['device']._preemption_controller = controller
+        return controller
+
+    def _finish_preemption(self, controller):
+        """任务结束后收尾：按需把任务放回待运行队列，并摘除心跳钩子。"""
+        if controller is None:
+            return
+        try:
+            if controller.reschedule_current():
+                logger.info(
+                    f'[抢占] 任务 `{controller.current_task}` 已放回待运行队列，'
+                    f'让位于 `{controller.preempted_by}`'
+                )
+        except Exception as e:
+            logger.warning(f'[抢占] 善后处理异常: {e}')
+        finally:
+            device = self.__dict__.get('device')
+            if device is not None:
+                device._preemption_controller = None
+            controller.release()
+
     def loop(self):
         logger.set_file_logger(self.config_name)
         logger.info(f'[Alas] 启动调度器循环: {self.config_name}')
@@ -2205,6 +2252,8 @@ class AzurLaneAutoScript:
                 self.device.stuck_record_clear()
                 self.device.click_record_clear()
                 logger.hr(task, level=0)
+                # 抢占式调度：注入控制器，使任务内的截图心跳能检查高优先级任务是否到期
+                preemption = self._prepare_preemption(task)
                 # 激活看门狗：任务执行期间监测日志心跳和运行时间
                 # 防止主线程卡死在 I/O 调用中或陷入逻辑死循环
                 self._watchdog_active = True
@@ -2221,6 +2270,9 @@ class AzurLaneAutoScript:
                     self._watchdog_active = False
                     self._watchdog_task_start = 0.0
                     self._watchdog_task_name = ''
+                    # 抢占善后必须在 _record_daily_summary_task_finish 之前，
+                    # 以便日报能记录到任务被中断后的真实归属
+                    self._finish_preemption(preemption)
                     self._record_daily_summary_task_finish(
                         daily_summary_run_id, success, task_started_at
                     )

@@ -87,6 +87,8 @@ class Device(Screenshot, Control, AppControl, Input):
     stuck_long_wait_list = ['BATTLE_STATUS_S', 'PAUSE', 'LOGIN_CHECK', 'TEMPLATE_MANJUU']
     _prev_fingerprint = None
     _stuck_image_timer = Timer(30, count=0)
+    # 抢占式调度控制器，由 Alas 主循环注入；为 None 时 check 为空操作
+    _preemption_controller = None
 
     def __init__(self, *args, auto_start_emulator=True, initialize_runtime=True, **kwargs):
         """
@@ -341,6 +343,7 @@ class Device(Screenshot, Control, AppControl, Input):
             截图图像，numpy 数组格式。
         """
         self.stuck_record_check()
+        self.preemption_check()
 
         try:
             super().screenshot()
@@ -357,6 +360,17 @@ class Device(Screenshot, Control, AppControl, Input):
 
         self._check_image_stuck()
         return self.image
+
+    def preemption_check(self):
+        """抢占式调度的心跳钩子。
+
+        每个任务循环都必然反复经过 screenshot()，因此在此检查是否有更高优先级
+        的任务到期。控制器由 Alas 主循环注入（``device._preemption_controller``）；
+        未注入或开关未开启时，开销仅是一次属性读取。
+        """
+        controller = self._preemption_controller
+        if controller is not None:
+            controller.check()
 
     def dump_hierarchy(self) -> etree._Element:
         self.stuck_record_check()
