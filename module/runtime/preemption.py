@@ -102,19 +102,18 @@ class PreemptionController:
 
     # ------------------------------------------------------------------ 判定
 
-    def _order(self):
-        """返回 {任务名: 优先级下标}，下标越小优先级越高。"""
-        from module.config.task_priority import parse_task_priority
-
-        priority = parse_task_priority(
-            self._setting('TaskPriorityAdjustment', '')
-        )
-        return {name: index for index, name in enumerate(priority)}
-
     def check(self):
         """心跳入口。命中抢占条件时抛出 TaskEnd。
 
-        未启用、间隔未到、或无更高优先级任务时静默返回。
+        判定**完全交给** ``config.check_task_switch()``：
+        ``task_switched()`` 会重新载入配置并按优先级重算队列，只有当胜出的
+        任务不再是当前任务时才判定为切换。这样做的好处是：
+
+        * 复用官方实现，不会遗漏 hoarding / error 队列 / ServerUpdate 等边界条件；
+        * ``task_switched()`` 用 ``Function.__eq__`` 比对「命令 + NextRun」，
+          天然覆盖了「低优先级到期任务挤占高优先级」的判定，无需自行比较；
+        * 中断走 ``task_stop()`` —— 它会先 ``async_executor.flush(timeout=2.0)``
+          等待异步任务收尾，再抛 TaskEnd，而不是粗暴硬切。
         """
         if not self.enabled or not self.current_task:
             return
@@ -129,62 +128,57 @@ class PreemptionController:
         if self.allowlist and self.current_task not in self.allowlist:
             return
 
-        order = self._order()
-        if not order:
-            return
-
-        candidates = self._pending_tasks()
-        if not candidates:
-            return
-
-        current_index = order.get(self.current_task, len(order))
-        for name in candidates:
-            rank = order.get(name, len(order))
-            if rank < current_index:
-                self._fire(name)
-        return
-
-    def _pending_tasks(self):
-        """重算队列并返回当前处于待运行(pending)状态的任务名。"""
-        try:
-            self.config.get_next_task()
-        except Exception:  # 计算失败时保守地不抢占
-            return []
-        pending = getattr(self.config, 'pending_task', None) or []
-        names = []
-        for func in pending:
-            name = _camp(getattr(func, 'command', ''))
-            if name and name != self.current_task:
-                names.append(name)
-        return names
-
-    def _fire(self, name):
         from module.config.config import TaskEnd
-        from module.logger import logger
 
-        self.triggered = True
-        self.preempted_by = name
-        logger.info(f'[抢占] 高优先级任务 `{name}` 已到期，中断当前任务 `{self.current_task}`')
-        logger.info(f'[抢占] `{self.current_task}` 将被放回待运行队列')
-        raise TaskEnd
+        try:
+            self.config.check_task_switch(message='preempted')
+        except TaskEnd:
+            # 记录抢占事实后继续抛出，由 alas.run() 的 except TaskEnd 收口
+            self.triggered = True
+            raise
 
     # ------------------------------------------------------------------ 善后
 
-    def reschedule_current(self):
-        """把被抢占的任务放回待运行队列。
+    def ensure_requeued(self):
+        """确保被抢占的任务回到待运行队列。
 
-        若不处理，``except TaskEnd → return True`` 会让调度器按成功处理，
-        任务被推迟整个成功间隔，等于吞掉一次执行。
+        ``TaskEnd`` 会让任务跳过末尾的 ``task_delay()``，因此 NextRun 通常
+        仍是到期状态，任务自然留在 pending 队列等待下次被选中，此时无需干预。
+
+        但若任务在执行途中已经推迟过自己的 NextRun（部分刷图类任务会周期性
+        更新），中断就等于吞掉这一次执行。这种情况下才回置 NextRun，
+        保证「放回排队列表」的语义成立。
+
+        Returns:
+            bool: 是否执行了回置。
         """
         if not self.triggered or not self.current_task:
             return False
         task = self.current_task
-        stamp = datetime.now().replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
-        self.config.modified[f'{task}.Scheduler.NextRun'] = stamp
+        try:
+            raw = self.config.cross_get(keys=[task, 'Scheduler', 'NextRun'], default=None)
+        except Exception:
+            return False
+
+        stamp = str(raw or '').replace('T', ' ').strip()
+        moment = None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f'):
+            try:
+                moment = datetime.strptime(stamp, fmt)
+                break
+            except ValueError:
+                continue
+        if moment is None or moment <= datetime.now():
+            # 仍处到期状态，已自然回到队列
+            return False
+
+        now_stamp = datetime.now().replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+        self.config.modified[f'{task}.Scheduler.NextRun'] = now_stamp
         try:
             self.config.update()
-        except Exception:  # 写入失败不应阻断主循环
+        except Exception as e:
             from module.logger import logger
 
-            logger.warning(f'[抢占] 回置 `{task}` 的 NextRun 失败')
+            logger.warning(f'[抢占] 回置 `{task}` 的 NextRun 失败: {e}')
+            return False
         return True

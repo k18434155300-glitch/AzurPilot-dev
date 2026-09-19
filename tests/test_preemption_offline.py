@@ -3,6 +3,12 @@
 不依赖项目第三方依赖，用 stub 替换 ``module.logger`` / ``module.config.config``，
 并通过文件路径直接加载 ``task_priority`` 以绕开包的 ``__init__``。
 
+设计说明
+--------
+抢占判定本身由 ``config.check_task_switch()`` 负责（它会载入最新配置并按优先级
+重算队列），本控制器的职责仅限「在何时、对哪些任务允许做这次检查」。
+因此这里用 ``FakeConfig`` 模拟官方判定结果，重点验证节流、白名单与善后语义。
+
 运行::
 
     python tests/test_preemption_offline.py
@@ -12,32 +18,43 @@ import importlib.util
 import os
 import sys
 import types
+from datetime import datetime, timedelta
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+STAMP = '%Y-%m-%d %H:%M:%S'
 
 
 class TaskEnd(Exception):
     """替代 module.config.config.TaskEnd。"""
 
 
-class PendingFunc:
-    def __init__(self, command):
-        self.command = command
-
-
 class FakeConfig:
-    """最小可用的配置替身。"""
+    """模拟 AzurLaneConfig 中与抢占判定相关的行为。"""
 
-    def __init__(self, data, pending=()):
+    def __init__(self, data, next_run=None):
         self.data = data
-        self.pending_task = [PendingFunc(c) for c in pending]
         self.modified = {}
         self.updated = 0
+        self.checks = 0
+        self.stopped = []
+        self.current_command = None
+        self.switch_to = None          # 模拟 get_next() 胜出的任务
+        self.next_run_map = next_run or {}
 
-    def get_next_task(self):
-        # 真实实现会重算 pending_task；这里沿用预置值即可
-        return None
+    # 以下模拟 PreemptionController 会用到的官方接口
+    def check_task_switch(self, message=''):
+        self.checks += 1
+        if self.switch_to and self.switch_to != self.current_command:
+            self.stopped.append(message)
+            raise TaskEnd(message)
+        return False
+
+    def cross_get(self, keys=None, default=None):
+        if isinstance(keys, list) and len(keys) == 3 and keys[2] == 'NextRun':
+            return self.next_run_map.get(keys[0])
+        return default
 
     def update(self):
         self.updated += 1
@@ -102,8 +119,8 @@ PreemptionController = preemption.PreemptionController
 PRIORITY = "Restart\n> OpsiScheduling\n> Commission\n> Research\n> Dorm"
 
 
-def make_config(pending, enabled=True, allowlist='', interval=15):
-    return FakeConfig(
+def make_config(pending=(), enabled=True, allowlist='', interval=15, next_run=None):
+    cfg = FakeConfig(
         {
             'General': {
                 'YukikazeTaskManager': {
@@ -114,73 +131,94 @@ def make_config(pending, enabled=True, allowlist='', interval=15):
                 }
             }
         },
-        pending=pending,
+        next_run=next_run,
     )
+    cfg.switch_to = pending[0] if pending else None
+    return cfg
+
+
+def _bound(cfg, current):
+    ctl = PreemptionController(cfg)
+    ctl.bind(current)
+    cfg.current_command = current
+    return ctl
 
 
 def test_disabled_by_default():
     """总开关关闭时绝不打扰任务执行。"""
     cfg = make_config(['OpsiScheduling'], enabled=False)
-    ctl = PreemptionController(cfg)
-    ctl.bind('Commission')
+    ctl = _bound(cfg, 'Commission')
     ctl.check()  # 不抛异常即通过
+    assert cfg.checks == 0, '未启用时不应调用官方判定'
     assert cfg.modified == {}
 
 
-def test_higher_priority_preempts():
-    """pending 中存在更高优先级任务 → 中断当前任务。"""
-    cfg = make_config(['OpsiScheduling'])  # OpsiScheduling(1) 高于 Commission(2)
-    ctl = PreemptionController(cfg)
-    ctl.bind('Commission')
+def test_switch_triggered_by_official_path():
+    """官方判定要求切换时，控制器应如实抛出 TaskEnd 并记录。"""
+    cfg = make_config(['OpsiScheduling'])
+    ctl = _bound(cfg, 'Commission')
     try:
         ctl.check()
         raise AssertionError('应当触发抢占')
     except TaskEnd:
         pass
     assert ctl.triggered is True
-    assert ctl.preempted_by == 'OpsiScheduling'
+    assert cfg.stopped == ['preempted']
 
 
-def test_lower_priority_keeps_running():
-    """pending 中的任务优先级更低 → 不打断。"""
-    cfg = make_config(['Research'])  # Research(3) 低于 OpsiScheduling(1)
-    ctl = PreemptionController(cfg)
-    ctl.bind('OpsiScheduling')
+def test_no_switch_keeps_running():
+    """官方判定仍是当前任务 → 不打断。"""
+    cfg = make_config(['Commission'])
+    ctl = _bound(cfg, 'Commission')
     ctl.check()
     assert ctl.triggered is False
 
 
 def test_allowlist_narrows_scope():
-    """白名单未包含当前任务时，即便有高优任务也不抢占。"""
+    """白名单未包含当前任务时，即便要求切换也不触发。"""
     cfg = make_config(['OpsiScheduling'], allowlist='Dorm, Research')
-    ctl = PreemptionController(cfg)
-    ctl.bind('Commission')
+    ctl = _bound(cfg, 'Commission')
     ctl.check()
+    assert cfg.checks == 0, '白名单未命中时不应调用官方判定'
     assert ctl.triggered is False
 
 
-def test_reschedule_puts_task_back():
-    """被抢占的任务应回写 NextRun，而不是被推迟到下一周期。"""
-    cfg = make_config(['OpsiScheduling'])
-    ctl = PreemptionController(cfg)
-    ctl.bind('Commission')
+def test_no_requeue_when_still_due():
+    """NextRun 仍处到期状态时无需回置，任务已自然在队列中。"""
+    past = (datetime.now() - timedelta(minutes=5)).strftime(STAMP)
+    cfg = make_config(['OpsiScheduling'], next_run={'Commission': past})
+    ctl = _bound(cfg, 'Commission')
     try:
         ctl.check()
     except TaskEnd:
         pass
-    assert ctl.reschedule_current() is True
-    stamp = cfg.modified.get('Commission.Scheduler.NextRun')
-    assert stamp, 'NextRun 未被回置'
+    assert ctl.ensure_requeued() is False
+    assert cfg.modified == {}, '不应篡改仍有效的到期时间'
+
+
+def test_requeue_when_next_run_delayed():
+    """任务中途已推迟 NextRun → 必须回置，否则本次执行会被吞掉。"""
+    future = (datetime.now() + timedelta(hours=3)).strftime(STAMP)
+    cfg = make_config(['OpsiScheduling'], next_run={'Commission': future})
+    ctl = _bound(cfg, 'Commission')
+    try:
+        ctl.check()
+    except TaskEnd:
+        pass
+    assert ctl.ensure_requeued() is True
+    written = cfg.modified.get('Commission.Scheduler.NextRun')
+    assert written, 'NextRun 未被回置'
+    assert datetime.strptime(written, STAMP) <= datetime.now()
     assert cfg.updated == 1, '未触发配置写回'
 
 
-def test_no_reschedule_without_trigger():
-    """正常结束时不应篡改 NextRun。"""
-    cfg = make_config(['Research'])
-    ctl = PreemptionController(cfg)
-    ctl.bind('OpsiScheduling')
+def test_no_requeue_without_trigger():
+    """正常结束时不应触碰 NextRun。"""
+    future = (datetime.now() + timedelta(hours=3)).strftime(STAMP)
+    cfg = make_config(['Commission'], next_run={'Commission': future})
+    ctl = _bound(cfg, 'Commission')
     ctl.check()
-    assert ctl.reschedule_current() is False
+    assert ctl.ensure_requeued() is False
     assert cfg.modified == {}
 
 
@@ -204,5 +242,5 @@ def _run_all():
 
 if __name__ == '__main__':
     print('抢占控制器离线验证')
-    print('=' * 40)
+    print('=' * 44)
     sys.exit(_run_all())

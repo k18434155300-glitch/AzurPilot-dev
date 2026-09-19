@@ -43,31 +43,74 @@ while 1:
 - 高频调用 → 必须节流（默认 15 秒一次，可配置）
 - 可能在不理想的瞬间中断 → 提供**允许抢占的任务白名单**，且开关默认关闭
 
-### 2.2 抢占判定
+### 2.1.1 关键：复用官方中断路径，而非自造
 
-任务开始执行后，`Scheduler.NextRun` 已被推迟到下一周期，因此运行中的任务
-**不在 pending 队列内**，`pending` 里全是其他候选任务。
+项目**已经存在**一套任务切换机制，且正是「取消勾选后跑完收尾再切换」的实现：
 
-判定条件：
+```python
+# module/config/config.py:738
+def task_switched(self):
+    prev = getattr(self, '_task_switch_owner', self.task)
+    self.load()                # 重新载入配置
+    new = self.get_next()      # 按优先级重算队列
+    if prev == new:
+        logger.info(f"[配置] 继续任务 `{new}`")
+        return False
+    logger.info(f"[配置] 切换任务 `{prev}` 到 `{new}`")
+    return True
 
+# :758
+def check_task_switch(self, message=""):
+    if getattr(self, '_disable_task_switch', False):
+        return
+    if self.task_switched():
+        self.task_stop(message=message)      # → raise TaskEnd
+
+# :720
+@staticmethod
+def task_stop(message=""):
+    async_executor.flush(timeout=2.0)        # ← 等待异步收尾
+    raise TaskEnd
 ```
-存在 pending 任务 P，使得 priority(P) < priority(当前任务)   # 下标越小优先级越高
-```
 
-命中即触发抢占。
+三个要点：
+
+1. **判定逻辑天然覆盖了抢占**。`get_next()` 会重算 pending 并按优先级排序，
+   只要胜出的不是当前任务就返回 True。而 `Function.__eq__` 比对的是
+   「命令 + NextRun」，所以高优先级任务一旦到期挤占队首，判定自动成立，
+   **无需自行比较优先级**。
+2. **`task_stop()` 会 `async_executor.flush(timeout=2.0)`**，等待异步任务落地后才抛
+   `TaskEnd`。这就是「跑完收尾再切换」的来源 —— 直接抛 `TaskEnd` 会跳过它，
+   可能导致异步任务（掉落统计、数据上报）不完整。
+3. 任务内部的 `if self.config.task_switched():` 是设计者选定的安全点，
+   但只分布在约 23 个文件里，**覆盖不全**，所以仍需心跳兜底。
+
+因此本实现不在控制器里自行判定，而是节流后调用 `config.check_task_switch()`，
+由官方路径完成「判定 → 收尾 → 中断」全流程。
+
+### 2.2 抢占判定：交给 `get_next()`
+
+不由控制器自行比较优先级。`task_switched()` 内部调用 `get_next()`，
+它会重新载入配置、重建 pending/waiting 队列并施加 `SCHEDULER_PRIORITY` 排序，
+返回队首任务。控制器只在额度到达时对 bookeeper 发起一次询问。
+
+这样做避开了重复实现可能遗漏的边界：`AzurLaneConfig.is_hoarding_task`、
+错误队列（`error + pending`）、`ServerUpdate` 修正等。
 
 ### 2.3 被抢占任务的处置
 
-`except TaskEnd → return True` 会让主循环认为任务成功，若不干预，
-该任务将被推迟整个成功间隔，等于被吞掉一次执行。
+`TaskEnd` 会让任务跳过末尾的 `task_delay()`，因此 `NextRun` 大概率仍是到期状态，
+任务**自然留在 pending 队列**等待下次被选中 —— 此时无需干预，强行回置反而会
+丢失「已到期多久」的信息。
 
-因此必须在检测到抢占后**回置 NextRun**：
+但若任务在执行途中已经推迟过自己的 NextRun（部分刷图类任务会周期性更新），
+中断就等于吞掉这一次执行。`ensure_requeued()` 只在这种情况下回置：
 
 ```python
-self.config.modified[f'{task}.Scheduler.NextRun'] = current_time().replace(microsecond=0)
+if next_run > now:                     # 已被推迟到未来
+    config.modified[f'{task}.Scheduler.NextRun'] = now
+    config.update()
 ```
-
-使其重新进入 pending，待高优任务执行完毕后按优先级再次被选中。
 
 ### 2.4 防抖
 

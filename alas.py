@@ -2133,10 +2133,10 @@ class AzurLaneAutoScript:
         if controller is None:
             return
         try:
-            if controller.reschedule_current():
+            if controller.ensure_requeued():
                 logger.info(
-                    f'[抢占] 任务 `{controller.current_task}` 已放回待运行队列，'
-                    f'让位于 `{controller.preempted_by}`'
+                    f'[抢占] 任务 `{controller.current_task}` 的 NextRun 已推迟过，'
+                    f'已将其放回待运行队列以避免本次执行被吞掉'
                 )
         except Exception as e:
             logger.warning(f'[抢占] 善后处理异常: {e}')
