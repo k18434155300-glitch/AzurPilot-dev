@@ -92,7 +92,9 @@ GIT=./bootstrap/git/cmd/git.exe     # 白名单内，清理后仍在
   `preemptive-scheduling.md` 第七章，这是「切断自动更新、改手动」的实现）。
 - 运行环境：MuMuPlayer12 @ `127.0.0.1:16384`，bilibili 服，
   截图 `ADB_nc`，控制 `MaaTouch`。
-- `.venv` 为 cpython-3.14；启动器自带 git 在 `.venv/Scripts/git/`。
+- `.venv` 为 cpython-3.14；自带 git 在 `.venv/Scripts/git/`，但**不完整**
+  （只有 `cmd/` 与 `mingw64/`，缺 `usr/bin` 即 `sh.exe`），所以执行 git 命令时
+  会借用系统 Git for Windows 的运行时目录，见 `deploy/git.py::git_runtime_path`。
 
 ## 四、个人数据备份清单
 
@@ -112,8 +114,10 @@ GIT=./bootstrap/git/cmd/git.exe     # 白名单内，清理后仍在
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 卡在 `FETCH REPOSITORY BRANCH`，`error_code: -1073741819` | `.git` 过大（含巨型 pack）致 git 崩溃 | 重建 `.git`，见 `preemptive-scheduling.md` 7.6 |
+| 卡在 `FETCH REPOSITORY BRANCH`，`error_code: -1073741819` | `0xC0000005`：子进程 PATH 无 Git 运行时目录，本地目录远端需 `sh`+`git-upload-pack` | 已由 `deploy/git.py::execute()` 自动补 PATH 修复；详见 `preemptive-scheduling.md` 7.6 |
 | `fatal: fetch-pack: invalid index-pack output` | `.git/objects/pack/` 残留 `tmp_pack_*` | `rm -f .git/objects/pack/tmp_pack_*` |
+| `git-upload-pack: command not found`（`rc=128`） | 只补了 `mingw64/bin`，缺 `usr/bin`（`sh.exe`） | 两个目录都要进 PATH |
+| `detected dubious ownership in repository` | 用系统 git 操作属 `BUILTIN/Administrators` 的目录 | 加 `-c safe.directory=*`；现方案用 `.venv` git，用不到 |
 | 启动器报找不到 Node.js | 它只探测标准路径（如 `C:\Program Files\nodejs`） | 接受其安装提议，或手工装到标准路径 |
 | 日志时间戳与本地时间差 8 小时 | `log/*_launcher.txt` 用 UTC | 北京时间 = 日志时间 + 8 |
 | `SAFE_DELETE_BULK_CONFIRM_REQUIRED` | WorkBuddy 会话注入的批量删除守卫 | 只影响会话内进程，与启动器无关 |

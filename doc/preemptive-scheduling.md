@@ -350,59 +350,6 @@ cd E:/AzurPilot
 不经过 installer，因此不做任何 git 操作。适合临时验证，
 但不能替代 7.2 的配置接管。
 
-### 7.6 排障实录：启动器卡在 `FETCH REPOSITORY BRANCH`
-
-**症状**：界面停在 `FETCH REPOSITORY BRANCH`，日志里 `fetch` 每次都在约 2.8 秒后
-以 `[ failure ], error_code: -1073741819` 结束，连续重试 10/20 次后放弃。
-
-**错误码含义**：`-1073741819` 的有符号 32 位表示为 `0xC0000005`，
-即 `STATUS_ACCESS_VIOLATION`——**git 子进程自身崩溃了**，不是网络问题，
-也不是分支/仓库地址写错。
-
-**根因**：运行实例 `.git` 目录累积到 **1.3 GB**，其中含一个 **988 MB 的巨型 pack**
-（`pack-dfb70047…`，来自最初 clone 官方仓库时把大批 OCR 模型、战斗资源一并拉了下来）。
-在这种体量的对象库上做 `fetch` 需要重新索引，`.venv` 内置的
-git 2.51.0 在 Windows 上直接崩掉。
-
-**关键鉴别**：同样的命令在不同环境里表现完全不同，容易误判——
-
-| 环境 | 结果 |
-| --- | --- |
-| 系统 git 2.55.0（bash） | 成功 |
-| `.venv` 内置 git 2.51.0（bash） | 成功 |
-| `.venv` 内置 git 2.51.0 + `os.system()`（启动器同款调用） | 成功 |
-| **启动器进程内** | **崩溃 `0xC0000005`** |
-
-所以在终端手工验证通过**不代表**启动器能用。必须用"看日志里的
-`error_code`"来判断，而不是只看手工命令的返回值。
-
-**修法：重建 `.git`**（安全，因为代码与全部个人数据都在 `.git` 之外）：
-
-```bash
-cd E:/AzurPilot
-mv .git .git.old-$(date +%Y%m%d-%H%M%S)      # 先保留，零风险
-GIT=./.venv/Scripts/git/cmd/git.exe
-"$GIT" init
-"$GIT" remote add origin E:/AzurPilot-master
-"$GIT" config --local http.sslVerify true
-"$GIT" fetch --progress origin main
-"$GIT" branch main origin/main
-"$GIT" symbolic-ref HEAD refs/heads/main
-"$GIT" reset --mixed origin/main             # 工作区不动，只对齐索引
-```
-
-重建后 `.git` 从 **1.3 GB 降到 354 MB**，`fetch` 连续 5 次全部 `exit=0`。
-
-**安全前提（务必先核对）**：重建前确认下面三点，否则会丢内容——
-
-1. `git ls-tree -r HEAD` 与源仓库逐行一致（本次比对 11429 条目全同）；
-2. 无本地独有提交：`git log --oneline origin/main..HEAD` 为空；
-3. 工作区无未提交改动：`git status --porcelain` 只剩未跟踪的 `alas-launcher.exe` 等。
-
-**不受影响的路径**（`mv .git` 不碰它们）：`.venv`、`frontend/`、`config/`（含
-`ap.json` 与两个 `.db`）、`log/`、`cache/`、`assets/`、`bin/`、`bootstrap/`。
-
-
 ### 7.4 验证与排障
 
 ```bash
@@ -453,3 +400,82 @@ git merge upstream/master                                     # 冲突集中在 
 回滚接管的办法：把 `config/deploy.yaml` 的 `Repository` 改回
 `git://git.pull/AzurPilot`、`Branch` 改回 `master`，备份在
 `config/deploy.yaml.repo-*.bak`。
+
+### 7.6 排障实录：启动器卡在 `FETCH REPOSITORY BRANCH`（`0xC0000005`）
+
+**症状**：界面停在 `FETCH REPOSITORY BRANCH`，日志里 `fetch` 每次都在约 2.8 秒后
+以 `[ failure ], error_code: -1073741819` 结束，连续重试后放弃。
+
+**错误码含义**：`-1073741819` 的无符号形式为 `3221225477`，即 `0xC0000005`
+`STATUS_ACCESS_VIOLATION`——**git 子进程自身崩溃**，不是网络问题，也不是
+分支或仓库地址写错。
+
+**真正的根因：子进程 PATH 里没有 Git 运行时目录。**
+
+把上游改成**本地目录** `E:/AzurPilot-master` 后，git 走的是 local transport：
+它要经 `sh` 去启动对端的 `git-upload-pack`，而这两个程序**只能靠 PATH 定位**。
+启动器拉起 Python 子进程时给的 PATH 里没有任何 Git 安装目录；恰好 `.venv`
+自带的那份 Git 又是**残缺的**——只有 `cmd/` 与 `mingw64/`，**没有 `usr/bin`**，
+也就是没有 `sh.exe`。`sh` 起不来，git 就以 `0xC0000005` 崩掉。
+
+二分验证的证据链：
+
+| 追加到 PATH 的目录 | 结果 |
+| --- | --- |
+| 无（原样） | 崩溃 `0xC0000005` |
+| 仅 `usr/bin` | `rc=128`，`git-upload-pack: command not found` |
+| `usr/bin` + `mingw64/bin` | **exit 0** |
+
+**修法：`deploy/git.py` 执行命令前自行补齐 PATH。**
+新增 `GitManager.git_runtime_path`（探测 Git for Windows 的 `mingw64/bin` 与
+`usr/bin`）与 `execute()` 重写，把命令前缀成：
+
+```
+set "PATH=<mingw64/bin>;<usr/bin>;%PATH%" && "…/git.exe" fetch origin main
+```
+
+这样 git 不再依赖调用方给的环境变量。探测顺序为：`GitExecutable` 自身的安装根 →
+`%ProgramFiles%\Git` → 硬编码的 `E:/Program Files/Git`、`C:/Program Files/Git` →
+PATH 上 `git` 的安装根；同一安装根下两个目录齐全时直接采用（最自洽），
+找不到就返回空列表、行为退回原样（对远端是 HTTP(S) 的场景无副作用）。
+
+**端到端验证（A/B 对照，子进程用启动器同款最小环境）**：
+
+| 组别 | 命令 | 结果 |
+| --- | --- | --- |
+| 对照组：不补 PATH | `git fetch origin main` | `3221225477`（= `0xC0000005`） |
+| 实验组：`GitManager.execute()` | `fetch --progress` | `[ success ]` |
+| 实验组：`GitManager.execute()` | `reset --hard origin/main` | `[ success ]` |
+| 实验组：`GitManager.execute()` | `pull --ff-only origin main` | `[ success ]` |
+
+**关键鉴别：手工终端跑通 ≠ 启动器能用。**
+
+| 环境 | 结果 |
+| --- | --- |
+| 系统 git 2.55.0（bash，PATH 完整） | 成功 |
+| `.venv` 内置 git 2.51.0（bash，PATH 完整） | 成功 |
+| `.venv` 内置 git 2.51.0 + `os.system()`（PATH 完整） | 成功 |
+| **启动器进程内（PATH 无 Git 目录）** | **崩溃 `0xC0000005`** |
+
+结论只能从日志的 `error_code` 读取，不能只看手工命令的返回值。
+
+**一个被推翻的中间结论（记录以免重蹈）**：最初判断为"运行实例 `.git` 太大"
+（1.3 GB，含 988 MB 巨型 pack），并据此重建了 `.git`（1.3 GB → 354 MB，
+`fsck` 干净）。**但 `fetch` 依然失败**——体积不是原因。重建本身无害且确实
+省了空间，可它不是解法；真正的解法是上面补 PATH 那一处。
+
+**两个相邻但独立的坑**：
+
+- `fatal: fetch-pack: invalid index-pack output`：`.git/objects/pack/` 下有
+  `tmp_pack_*` 残留（来自被中断的抓取），删掉重跑即可。
+- `detected dubious ownership in repository`：用**系统** git 操作 `E:/AzurPilot`
+  时会报（该目录属 `BUILTIN/Administrators`，当前用户是 `18434`），需要
+  `-c safe.directory=*`。最终方案用的是 `.venv` 的 git + 系统 Git 的运行时目录，
+  用不到它，但作为回退方案验证过可行。
+
+**排查方法上的两个注意点**：
+
+1. 模拟启动器环境时，**不要**在父进程里 `os.environ.clear()`——那样会连沙箱
+   注入的标记变量一起清掉，导致后续子进程创建被拒（表现为任何命令都 `rc=1`
+   且无输出）。正确做法是父进程环境不动，只把**子进程**的 `env` 换成最小集。
+2. 崩溃时可能在 `.git/objects/pack/` 留下 `tmp_pack_*`，验证完顺手检查一次。
