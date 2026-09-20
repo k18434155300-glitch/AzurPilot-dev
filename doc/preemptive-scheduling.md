@@ -271,8 +271,9 @@ python tools/priority_adjust.py --config E:/AzurPilot/config/ap.json \
 python tests/test_preemption_offline.py
 ```
 
-覆盖六个场景：默认关闭不打扰、高优先级抢占、低优先级不打断、
-白名单收敛范围、抢占后 NextRun 正确回置、正常结束不篡改 NextRun。
+覆盖七个场景：默认关闭不打扰、高优先级抢占、低优先级不打断、
+白名单收敛范围、抢占后 NextRun 正确回置、仍在到期状态时不回置、
+正常结束不篡改 NextRun。
 
 ## 六、风险与回滚
 
@@ -281,3 +282,119 @@ python tests/test_preemption_offline.py
   但首次启用建议先在少量任务上验证。
 - 全部改动受单一总开关控制，置 false 后行为完全等同改动前。
 - 回滚：本仓库基线提交为 `85d0170`，`git revert` 或 `git reset --hard 85d0170` 即可。
+
+## 七、部署与启动（更新源接管）
+
+### 7.1 为什么必须动更新逻辑
+
+源码改动写在受 git 跟踪的文件里（`alas.py`、`module/device/device.py`），
+而启动器每次冷启动都会执行 `deploy/installer.py` → `git_install()` →
+`git reset --hard origin/<Branch>`，本地改动会被直接抹掉。这条路径有两条：
+
+| 路径 | 触发时机 | 是否抹掉本地改动 |
+| --- | --- | --- |
+| `deploy/installer.py` → `git_install()` | 双击 `alas-launcher.exe` 冷启动 | **会**，无条件 |
+| `module/runtime/updater.py` → `check_update_loop()` | WebUI 运行期，每 `CheckUpdateInterval` 分钟 | 否，自带保护 |
+
+两者的总闸都是同一个云端返回值 `https://alas-apiv2.nanoda.work/api/updata`，
+返回 `None`（不可达）会 `raise ExecutionError` 直接终止启动，
+因此**断网、hosts 屏蔽、防火墙拦截都不可行**——必须让它连得上，再从源头换掉货。
+
+### 7.2 做法：把上游换成自己的仓库
+
+`deploy/installer.py` 里唯一的「软开关」其实是 `config/deploy.yaml` 的
+`Repository` 与 `Branch`：这条路径会用它们去 `git remote set-url`。
+而 `config/deploy.yaml` 有两个天然优势：
+
+- 被 `.gitignore:10`（`config/*.yaml`）排除，**不参与 `reset --hard`**；
+- 位于 `config/` 目录内，**属于启动失败清理的白名单**，不会被误删。
+
+所以不需要改 `deploy/git.py` 一行代码，改配置即可让"自动更新"拉取我们自己的仓库，
+顺带实现「手动跟进上游」：
+
+```yaml
+Deploy:
+  Git:
+    Repository: E:/AzurPilot-master   # 本地源码仓库
+    Branch: main                      # 该仓库的分支名
+```
+
+配套要点：
+
+1. **先把 `.gitignore` 排除的文件补回源码仓库**：当初做基线快照时，
+   `AGENTS.md`、`.claude/settings*.json`、`.cursor/rules/*.mdc` 被忽略规则排除。
+   它们在上游是被跟踪的，`reset --hard` 会按「目标树里没有」把这几个文件从磁盘删掉。
+   用 `git add -f` 补回（提交 `5431552`）。
+2. **本地校验再双击**：完整模拟一次启动时的 git 序列，确认不炸（见 7.4）。
+3. **`.venv`、`frontend/dist`、`node_modules`、`cache/`、`config/` 都是未跟踪或白名单内容**，
+   `reset --hard` 不会碰它们，切换上游不需要重建虚拟环境。
+4. `GitOverCdn` 默认为 `False`（`deploy/config.py:79`），不会走 CDN 那条旁路绕过 git。
+
+### 7.3 两条启动方式
+
+**方式一（推荐）：双击 `alas-launcher.exe`。**
+`frontend/dist/.source-fingerprint` 与源码指纹一致时，`ensure_frontend()`
+会直接短路返回，**不需要 Node/npm**。只有某次失败清理删掉 `frontend/`
+导致 `dist` 不复存在时，才会要求 Node 重建前端——这种情况下可手工执行
+`npm ci && npm run build`，或安装标准路径的 Node.js 作为保险。
+
+**方式二：绕开启动器直启 WebUI。**
+
+```bash
+cd E:/AzurPilot
+.venv/Scripts/python.exe gui.py        # 默认监听 0.0.0.0:25548
+```
+
+不经过 installer，因此不做任何 git 操作。适合临时验证，
+但不能替代 7.2 的配置接管。
+
+### 7.4 验证与排障
+
+```bash
+cd E:/AzurPilot
+# 1. 确认部署配置已生效
+.venv/Scripts/python.exe -c "from deploy.config import DeployConfig as D; print(D().Repository, D().Branch)"
+
+# 2. 完整模拟启动时的 git 序列（reset 后应落在自己的提交上）
+GIT=./.venv/Scripts/git/cmd/git.exe
+"$GIT" fetch origin main && "$GIT" reset --hard origin/main && "$GIT" pull --ff-only origin main
+
+# 3. 离线测试
+.venv/Scripts/python.exe tests/test_preemption_offline.py
+```
+
+预期的端到端现象：WebUI 启动后日志出现
+
+```
+[GUI] WebUI 服务已就绪 (PID: ...)
+... fetch origin main
+From E:/AzurPilot-master
+ * branch  main -> FETCH_HEAD
+无更新
+```
+
+**排障：`fatal: fetch-pack: invalid index-pack output`。**
+这是 `.git/objects/pack/` 下遗留了 `tmp_pack_*` 临时文件所致
+（通常来自被中断的抓取）。删除它们后重跑即可：
+
+```bash
+rm -f .git/objects/pack/tmp_pack_*
+```
+
+### 7.5 手动跟进上游
+
+配置接管后不再自动接收官方更新。需要跟进时在源码仓库里操作：
+
+```bash
+cd E:/AzurPilot-master
+git remote add upstream https://github.com/wess09/AzurPilot   # 或官方镜像
+git fetch upstream
+git merge upstream/master                                     # 冲突集中在 alas.py / device.py
+```
+
+合并后运行实例会在下次冷启动时自动拉取。若官方改动与抢占钩子冲突，
+重点看 `alas.py::loop()` 的 `try/finally` 与 `Device.screenshot()` 两处插入点。
+
+回滚接管的办法：把 `config/deploy.yaml` 的 `Repository` 改回
+`git://git.pull/AzurPilot`、`Branch` 改回 `master`，备份在
+`config/deploy.yaml.repo-*.bak`。
