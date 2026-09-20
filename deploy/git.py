@@ -1,5 +1,7 @@
 import random
+import shutil
 import time
+from pathlib import Path
 
 import requests
 
@@ -23,6 +25,72 @@ class GitManager(DeployConfig):
 
         logger.warning(f'GitExecutable: {exe} does not exist, use `git` instead')
         return 'git'
+
+    @cached_property
+    def git_runtime_path(self):
+        """Git for Windows 运行时目录（mingw64/bin 与 usr/bin）。
+
+        以本地路径作为远端时，`git fetch` 会经 `sh` 启动 `git-upload-pack`，
+        这两个程序都只能靠 PATH 定位。启动器拉起子进程时的 PATH 常常不含任何
+        Git 安装目录，而 `.venv` 自带的那份 Git 又是残缺的（有 mingw64/ 但无
+        usr/bin，即没有 sh.exe），于是 git 会以 `0xC0000005`（ACCESS_VIOLATION）
+        崩溃，部署日志里表现为 `[ failure ], error_code: -1073741819`。
+
+        此处把运行时目录在执行命令前补进 PATH，使 git 不再依赖调用方的环境变量。
+
+        Returns:
+            list: 需要前置到 PATH 的目录，使用正斜杠（deploy 的 execute 会把
+            反斜杠统一改写为正斜杠）。找不到时返回空列表，行为退回原样。
+        """
+        roots = []
+
+        # GitExecutable 自身所属的 Git 安装根目录
+        try:
+            exe = Path(self.git).resolve()
+            roots += [exe.parent.parent, exe.parent.parent.parent]
+        except Exception:
+            pass
+
+        # 系统常见的 Git for Windows 安装位置
+        for env_key in ('ProgramFiles', 'ProgramFiles(x86)'):
+            value = os.environ.get(env_key)
+            if value:
+                roots.append(Path(value) / 'Git')
+        roots += [Path('E:/Program Files/Git'), Path('C:/Program Files/Git')]
+
+        # PATH 上能找到的 git，取其安装根目录
+        found = shutil.which('git')
+        if found:
+            try:
+                roots.append(Path(found).resolve().parent.parent)
+            except Exception:
+                pass
+
+        fallback = []
+        for root in roots:
+            try:
+                if not root.is_dir():
+                    continue
+            except Exception:
+                continue
+            pair = [root / 'mingw64/bin', root / 'usr/bin']
+            # 同一安装目录下两个目录齐全时最自洽，直接采用
+            if all(p.is_dir() for p in pair):
+                return [str(p).replace('\\', '/') for p in pair]
+            for p in pair:
+                if p.is_dir():
+                    text = str(p).replace('\\', '/')
+                    if text not in fallback:
+                        fallback.append(text)
+        return fallback
+
+    def execute(self, command, allow_failure=False, output=True):
+        """执行 git 命令前补齐运行时目录，避免 PATH 缺失导致 git 崩溃。"""
+        if 'git' in command.lower():
+            dirs = self.git_runtime_path
+            if dirs:
+                command = 'set "PATH={};%PATH%" && {}'.format(';'.join(dirs), command)
+        return super().execute(command, allow_failure=allow_failure, output=output)
 
     @staticmethod
     def remove(file):
