@@ -333,10 +333,12 @@ Deploy:
 ### 7.3 两条启动方式
 
 **方式一（推荐）：双击 `alas-launcher.exe`。**
-`frontend/dist/.source-fingerprint` 与源码指纹一致时，`ensure_frontend()`
-会直接短路返回，**不需要 Node/npm**。只有某次失败清理删掉 `frontend/`
-导致 `dist` 不复存在时，才会要求 Node 重建前端——这种情况下可手工执行
-`npm ci && npm run build`，或安装标准路径的 Node.js 作为保险。
+启动器会自行探测并安装 Node.js（实测日志：
+`Node.js runtime is available version="v24.21.0" executable=C:\Program Files\nodejs\node.exe`），
+因此前端重建能力已经就位，不必手工装 Node。
+另外 `frontend/dist/.source-fingerprint` 与源码指纹一致时，`ensure_frontend()`
+会直接短路返回，**即便没有 Node 也能启动**。只有某次失败清理删掉 `frontend/`
+导致 `dist` 不复存在时，才会真正触发 `npm ci && npm run build`。
 
 **方式二：绕开启动器直启 WebUI。**
 
@@ -347,6 +349,59 @@ cd E:/AzurPilot
 
 不经过 installer，因此不做任何 git 操作。适合临时验证，
 但不能替代 7.2 的配置接管。
+
+### 7.6 排障实录：启动器卡在 `FETCH REPOSITORY BRANCH`
+
+**症状**：界面停在 `FETCH REPOSITORY BRANCH`，日志里 `fetch` 每次都在约 2.8 秒后
+以 `[ failure ], error_code: -1073741819` 结束，连续重试 10/20 次后放弃。
+
+**错误码含义**：`-1073741819` 的有符号 32 位表示为 `0xC0000005`，
+即 `STATUS_ACCESS_VIOLATION`——**git 子进程自身崩溃了**，不是网络问题，
+也不是分支/仓库地址写错。
+
+**根因**：运行实例 `.git` 目录累积到 **1.3 GB**，其中含一个 **988 MB 的巨型 pack**
+（`pack-dfb70047…`，来自最初 clone 官方仓库时把大批 OCR 模型、战斗资源一并拉了下来）。
+在这种体量的对象库上做 `fetch` 需要重新索引，`.venv` 内置的
+git 2.51.0 在 Windows 上直接崩掉。
+
+**关键鉴别**：同样的命令在不同环境里表现完全不同，容易误判——
+
+| 环境 | 结果 |
+| --- | --- |
+| 系统 git 2.55.0（bash） | 成功 |
+| `.venv` 内置 git 2.51.0（bash） | 成功 |
+| `.venv` 内置 git 2.51.0 + `os.system()`（启动器同款调用） | 成功 |
+| **启动器进程内** | **崩溃 `0xC0000005`** |
+
+所以在终端手工验证通过**不代表**启动器能用。必须用"看日志里的
+`error_code`"来判断，而不是只看手工命令的返回值。
+
+**修法：重建 `.git`**（安全，因为代码与全部个人数据都在 `.git` 之外）：
+
+```bash
+cd E:/AzurPilot
+mv .git .git.old-$(date +%Y%m%d-%H%M%S)      # 先保留，零风险
+GIT=./.venv/Scripts/git/cmd/git.exe
+"$GIT" init
+"$GIT" remote add origin E:/AzurPilot-master
+"$GIT" config --local http.sslVerify true
+"$GIT" fetch --progress origin main
+"$GIT" branch main origin/main
+"$GIT" symbolic-ref HEAD refs/heads/main
+"$GIT" reset --mixed origin/main             # 工作区不动，只对齐索引
+```
+
+重建后 `.git` 从 **1.3 GB 降到 354 MB**，`fetch` 连续 5 次全部 `exit=0`。
+
+**安全前提（务必先核对）**：重建前确认下面三点，否则会丢内容——
+
+1. `git ls-tree -r HEAD` 与源仓库逐行一致（本次比对 11429 条目全同）；
+2. 无本地独有提交：`git log --oneline origin/main..HEAD` 为空；
+3. 工作区无未提交改动：`git status --porcelain` 只剩未跟踪的 `alas-launcher.exe` 等。
+
+**不受影响的路径**（`mv .git` 不碰它们）：`.venv`、`frontend/`、`config/`（含
+`ap.json` 与两个 `.db`）、`log/`、`cache/`、`assets/`、`bin/`、`bootstrap/`。
+
 
 ### 7.4 验证与排障
 
