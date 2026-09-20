@@ -88,6 +88,46 @@ def task_stop(message=""):
 因此本实现不在控制器里自行判定，而是节流后调用 `config.check_task_switch()`，
 由官方路径完成「判定 → 收尾 → 中断」全流程。
 
+### 2.1.2 更严格的一层：`_disable_task_switch`
+
+官方保护比我们设想的「中断前先退出战斗」还要严格——**刷图期间干脆禁止中断**。
+
+`module/os/tasks/scheduling.py:935` 在智能调度切换子任务时设置：
+
+```python
+self.config._disable_task_switch = task_name not in (
+    self.TASK_NAME_HAZARD1_LEVELING,      # 侵蚀1练级
+    self.TASK_NAME_MEOWFFICER_FARMING,    # 耄耋相接
+)
+```
+
+而 `check_task_switch()` 开头就是：
+
+```python
+if getattr(self, '_disable_task_switch', False):
+    logger.info('[配置] 任务切换检查已临时禁用')
+    return
+```
+
+即：**除练级与耄耋相接外，大世界子任务执行期间不响应任何切换请求**，
+包括本抢占。这带来两个结论：
+
+* 心跳在刷图中触发时会被静默忽略，**不会把游戏丢在战斗界面**，
+  无需再实现「先 `ensure_auto_search_exit()` 再中断」；
+* 抢占真正生效的时机是**子任务边界**（调度层重新选择子任务的间隙），
+  这正是「在长任务中间插入其他任务」想要的位置。
+
+`_task_switch_owner` 则保证智能调度内部切换子任务时，
+对外仍视作同一个主人任务（`OpsiScheduling`），不会被误判为任务已切换。
+
+> 因此当前实现**不做**绕过 `_disable_task_switch` 的强制中断。
+> 若未来确有需要，应作为独立开关并自行承担战斗状态残留的风险。
+
+### 2.1.3 重入保护
+
+`task_stop()` 的收尾、`ensure_auto_search_exit()` 内部都会调用
+`device.screenshot()`，会再次进入本钩子。控制器用 `_in_check` 标志切断递归。
+
 ### 2.2 抢占判定：交给 `get_next()`
 
 不由控制器自行比较优先级。`task_switched()` 内部调用 `get_next()`，
@@ -159,8 +199,26 @@ python tools/preemption_config.py --config E:/AzurPilot/config/ap.json --enable 
 python tools/preemption_config.py --config E:/AzurPilot/config/ap.json --disable
 ```
 
-**建议的上线顺序**：先只放行少量幂等任务（如 `Commission`、`Reward`），
-观察到日志出现 `[抢占]` 记录且被中断任务能正常回位后，再移除白名单放开全部。
+### 优先级调整
+
+长耗时任务（不手动停止就会一直运行）应下调到表末尾，使其只在其他任务
+都处理完时空闲运行：
+
+```bash
+python tools/priority_adjust.py --config E:/AzurPilot/config/ap.json --show
+
+python tools/priority_adjust.py --config E:/AzurPilot/config/ap.json \
+    --move-to-end OpsiScheduling ThreeOilLowCost --dry-run   # 先预览
+```
+
+优先级下调与抢占是配套的：下调只决定「排队时排在哪」，而**正在运行的长任务
+能被后来者挤掉，靠的是抢占**。
+
+### `TaskPreemptionAllowlist` 的定位
+
+它只是**窄化影响范围**的手段（比如只想让某几个任务参与抢占），
+**不是安全保护**。不要把「排除战斗任务」当作规避风险的方案——
+需要被抢占的往往恰恰就是战斗任务，而安全性由下一节的机制保证。
 
 ## 五、验证
 

@@ -54,6 +54,9 @@ class PreemptionController:
         self._last_check_monotonic = 0.0
         self.triggered = False
         self.preempted_by = ''
+        # task_stop() 的收尾与 ensure_auto_search_exit() 内部都会截图，
+        # 会再次进入本钩子，用重入标志切断递归
+        self._in_check = False
         self._load_settings()
 
     # ------------------------------------------------------------------ 配置
@@ -127,15 +130,21 @@ class PreemptionController:
 
         if self.allowlist and self.current_task not in self.allowlist:
             return
+        if self._in_check:
+            # 收尾流程（async_executor.flush / 退出战斗）内部截图会再次进入本钩子
+            return
 
         from module.config.config import TaskEnd
 
+        self._in_check = True
         try:
             self.config.check_task_switch(message='preempted')
         except TaskEnd:
             # 记录抢占事实后继续抛出，由 alas.run() 的 except TaskEnd 收口
             self.triggered = True
             raise
+        finally:
+            self._in_check = False
 
     # ------------------------------------------------------------------ 善后
 
