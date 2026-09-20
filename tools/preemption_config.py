@@ -68,7 +68,7 @@ def show(group):
     print('当前抢占配置：')
     for key, default in (
         (KEY_ENABLE, False),
-        (KEY_INTERVAL, 15),
+        (KEY_INTERVAL, 5),
         (KEY_ALLOWLIST, '(不限)'),
     ):
         value = group.get(key, default)
@@ -83,7 +83,9 @@ def main(argv=None):
     parser.add_argument('--enable', action='store_true', help='启用抢占')
     parser.add_argument('--disable', action='store_true', help='关闭抢占')
     parser.add_argument('--show', action='store_true', help='仅显示当前配置')
-    parser.add_argument('--interval', type=int, default=15, help='检查间隔秒数')
+    parser.add_argument('--interval', type=int, default=5,
+                        help='检查间隔秒数（默认 5；每次检查含一次配置树 deepcopy，'
+                             '不建议低于 3）')
     parser.add_argument('--allowlist', default='', help='允许被抢占的任务，逗号分隔')
     parser.add_argument('--no-backup', action='store_true', help='写入前不备份')
     args = parser.parse_args(argv)

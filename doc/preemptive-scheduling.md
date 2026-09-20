@@ -40,7 +40,12 @@ while 1:
 
 代价与取舍：
 
-- 高频调用 → 必须节流（默认 15 秒一次，可配置）
+- 高频调用 → 必须节流（**默认 5 秒**一次，可配置）
+
+  每次检查会经 `check_task_switch()` → `task_switched()` → `load()`，
+  其中包含一次配置树 `deepcopy`（95 个任务组），实测几十毫秒量级。
+  5 秒的开销占比可忽略；**不建议低于 3 秒**——`deepcopy` 会在战斗心跳里
+  产生可感知的延迟。
 - 可能在不理想的瞬间中断 → 提供**允许抢占的任务白名单**，且开关默认关闭
 
 ### 2.1.1 关键：复用官方中断路径，而非自造
@@ -123,7 +128,25 @@ if getattr(self, '_disable_task_switch', False):
 > 因此当前实现**不做**绕过 `_disable_task_switch` 的强制中断。
 > 若未来确有需要，应作为独立开关并自行承担战斗状态残留的风险。
 
-### 2.1.3 重入保护
+### 2.1.3 为何不做「战斗状态保护」
+
+曾考虑过一个更保守的方案：抢占前先用当前截图做一次模板匹配
+（`is_in_auto_search_menu()` 的本质就是一次 `match_luma`），
+若正处在自动搜索战斗界面就跳过本次，等下一轮心跳，让中断尽量落在非战斗间隙。
+
+技术上完全可行——抢占点恰好持有最新截图。**但最终没有采用**，理由是：
+
+* **大世界练级是连续战斗**，「非战斗时刻」可能长时间不出现，
+  抢占会形同虚设，甚至因为迟迟不触发而引入难以排查的行为；
+* 项目自身的检查点（如 `hazard_leveling.py:153`）本就落在一轮结束附近，
+  实践中同样靠近战斗，额外回避并无实质收益；
+* 引入 UI 判定会增加与页面系统的耦合，反而可能带来新的判定错误。
+
+结论：**不回避战斗状态，与官方行为保持一致**。
+数据安全性由 `task_stop()` 的 `async_executor.flush(timeout=2.0)` 承接，
+游戏状态则由下一个任务进入时的 `ui_goto` 自愈。
+
+### 2.1.4 重入保护
 
 `task_stop()` 的收尾、`ensure_auto_search_exit()` 内部都会调用
 `device.screenshot()`，会再次进入本钩子。控制器用 `_in_check` 标志切断递归。
@@ -194,7 +217,7 @@ if next_run > now:                     # 已被推迟到未来
 
 ```bash
 python tools/preemption_config.py --config E:/AzurPilot/config/ap.json --enable \
-    --interval 15 --allowlist "OpsiScheduling, Commission"
+    --interval 5
 
 python tools/preemption_config.py --config E:/AzurPilot/config/ap.json --disable
 ```

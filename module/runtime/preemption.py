@@ -28,7 +28,11 @@
 from datetime import datetime
 
 
-DEFAULT_CHECK_INTERVAL = 15
+# 检查间隔。每次检查会经 check_task_switch() → task_switched() → load()，
+# 其中包含一次配置树的 deepcopy（95 个任务组），实测开销在几十毫秒量级。
+# 取 5 秒：相对一轮刷图（数分钟）足够及时，开销占比可忽略。
+# 若调至 1 秒，deepcopy 会在战斗心跳里产生可感知的延迟，不建议。
+DEFAULT_CHECK_INTERVAL = 5
 
 _GROUP = ('General', 'YukikazeTaskManager')
 
