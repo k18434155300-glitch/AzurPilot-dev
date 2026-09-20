@@ -28,11 +28,20 @@
 from datetime import datetime
 
 
-# 检查间隔。每次检查会经 check_task_switch() → task_switched() → load()，
-# 其中包含一次配置树的 deepcopy（95 个任务组），实测开销在几十毫秒量级。
-# 取 5 秒：相对一轮刷图（数分钟）足够及时，开销占比可忽略。
-# 若调至 1 秒，deepcopy 会在战斗心跳里产生可感知的延迟，不建议。
-DEFAULT_CHECK_INTERVAL = 5
+# 检查间隔（秒）。
+#
+# 取 60 而非更短，是刻意的：大世界自动搜索在 module/os/map.py:1030 已有
+# 「每场战斗（约 20–30 秒）」的检查点，且命中后会调 interrupt_auto_search()
+# ——它会把游戏从战斗执行中导航回主页面/地图页再抛 TaskEnd，比本控制器
+# 直接走 task_stop() 更干净。
+#
+# 因此本心跳的定位是「兜底」而非「主力」：把优雅中断让给官方机制，
+# 只在任务卡死、或官方检查点覆盖不到的场景（如无自动搜索循环的普通任务）
+# 才介入。间隔设得比官方检查周期长，可确保官方优先触发。
+#
+# 每次检查经 check_task_switch() → task_switched() → load()，含一次配置树
+# deepcopy（95 个任务组，几十毫秒），60 秒一次的开销完全可忽略。
+DEFAULT_CHECK_INTERVAL = 60
 
 _GROUP = ('General', 'YukikazeTaskManager')
 

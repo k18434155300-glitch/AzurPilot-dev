@@ -83,9 +83,10 @@ def main(argv=None):
     parser.add_argument('--enable', action='store_true', help='启用抢占')
     parser.add_argument('--disable', action='store_true', help='关闭抢占')
     parser.add_argument('--show', action='store_true', help='仅显示当前配置')
-    parser.add_argument('--interval', type=int, default=5,
-                        help='检查间隔秒数（默认 5；每次检查含一次配置树 deepcopy，'
-                             '不建议低于 3）')
+    parser.add_argument('--interval', type=int, default=60,
+                        help='检查间隔秒数（默认 60。大世界自动搜索已有每场战斗约 '
+                             '20–30 秒的检查点且会优雅中断，故本心跳定位为兜底，'
+                             '间隔应大于官方周期）')
     parser.add_argument('--allowlist', default='', help='允许被抢占的任务，逗号分隔')
     parser.add_argument('--no-backup', action='store_true', help='写入前不备份')
     args = parser.parse_args(argv)
