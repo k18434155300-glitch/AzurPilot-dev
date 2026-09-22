@@ -215,6 +215,9 @@ class AutoSearchCombat(MapOperation, Combat, CampaignStatus):
                 self.map_offensive_auto_search()
                 # Map offensive ends at is_combat_loading
                 break
+            # 「合计获得奖励」结算框：连续作战一批打完会出现，点离开才能继续
+            if self.handle_total_rewards():
+                continue
             if self.handle_auto_search_map_option():
                 continue
             if self.handle_combat_low_emotion():
@@ -271,6 +274,9 @@ class AutoSearchCombat(MapOperation, Combat, CampaignStatus):
                 self.device.screenshot_interval_set()
                 self.map_offensive_auto_search()
                 self.device.screenshot_interval_set('combat')
+                continue
+            # 「合计获得奖励」结算框：连续作战一批打完会出现，点离开才能继续
+            if self.handle_total_rewards():
                 continue
 
             # End

@@ -1733,6 +1733,11 @@ class AzurLaneAutoScript:
         GemsFarming(config=self.config, device=self.device).run(
             name=self.config.Campaign_Name, folder=self.config.Campaign_Event, mode=self.config.Campaign_Mode)
 
+    def low_cost_rotation(self):
+        from module.campaign.low_cost_rotation import LowCostRotation
+        LowCostRotation(config=self.config, device=self.device).run(
+            name=self.config.Campaign_Name, folder=self.config.Campaign_Event, mode=self.config.Campaign_Mode)
+
     def ambush11(self):
         from module.campaign.ambush_1_1 import Ambush11
         Ambush11(config=self.config, device=self.device).run()

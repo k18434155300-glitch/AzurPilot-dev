@@ -271,6 +271,20 @@ class MapOperation(MysteryHandler, FleetPreparation, Retirement, FastForwardHand
             if self.appear_then_click(HANDOVER_DIALOG_CLOSE, offset=(20, 20), interval=1):
                 continue
 
+    def handle_continuous_battle_setting(self):
+        """连续作战设置钩子。
+
+        默认不处理连续作战，返回 False，`enter_map()` 会按普通流程点
+        「立刻前往」出击。
+
+        需要连续作战的任务覆写此方法：在连续作战自己的设置弹窗内完成出击，
+        并返回 True，`enter_map()` 据此跳过「立刻前往」。
+
+        Returns:
+            bool: True 表示已经在弹窗内出击。
+        """
+        return False
+
     def enter_map(self, button, mode='normal', skip_first_screenshot=True):
         """
         进入战役关卡。
@@ -353,13 +367,17 @@ class MapOperation(MysteryHandler, FleetPreparation, Retirement, FastForwardHand
 
                 # 舰队准备
                 if fleet_timer.reached() and self.appear(FLEET_PREPARATION, offset=(20, 50)):
+                    entered = False
                     if mode == 'normal' or mode == 'hard':
                         self.handle_2x_book_setting(mode='prep')
                         self.fleet_preparation()
                         self.handle_auto_submarine_call_disable()
                         self.handle_auto_search_setting()
+                        # 连续作战会在自己的设置弹窗内出击，此时不能再点「立刻前往」
+                        entered = self.handle_continuous_battle_setting()
                         self.map_fleet_checked = True
-                    self.device.click(FLEET_PREPARATION)
+                    if not entered:
+                        self.device.click(FLEET_PREPARATION)
                     fleet_click += 1
                     fleet_timer.reset()
                     campaign_timer.reset()

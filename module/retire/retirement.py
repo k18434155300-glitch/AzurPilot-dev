@@ -444,9 +444,14 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         """
         logger.info('[退役-保留] 退役钻石打捞/三油低耗的废弃旗舰')
 
-        gems_farming_enable: bool = self.config.is_task_enabled('GemsFarming') or self.config.is_task_enabled('ThreeOilLowCost')
+        # 低耗轮换同样适用：它的旗舰也是 1 级白皮航母，一批打完升级后需要清掉
+        gems_farming_enable: bool = (
+                self.config.is_task_enabled('GemsFarming')
+                or self.config.is_task_enabled('ThreeOilLowCost')
+                or self.config.is_task_enabled('LowCostRotation')
+        )
         if not gems_farming_enable:
-            logger.info('[退役-保留] 非钻石打捞/三油低耗任务，跳过')
+            logger.info('[退役-保留] 非钻石打捞/三油低耗/低耗轮换任务，跳过')
             return 0
 
         self.dock_favourite_set(wait_loading=False)
@@ -499,6 +504,70 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         # 退役完成，即将退出，无需等待加载
         self.dock_filter_set(wait_loading=False)
 
+        return total
+
+    def retire_low_cost_vanguards(self) -> int:
+        """退役低耗轮换用过的先锋（普通驱逐）。
+
+        与 `retire_gems_farming_flagships()` 对称：那个负责旗舰（航母），
+        这个负责先锋（驱逐）。三油低耗的前排是百级驱逐、属于长期资产，
+        本来不需要退役；而低耗轮换的前排是 1 级驱逐、一批打完就整套换掉，
+        属于用完即弃的一次性船，必须清掉。
+
+        退役范围是等级 2~99 的白皮驱逐：
+
+        - 1 级的留着下一批用（下一批要从船坞里挑 1 级驱逐）
+        - 100 级的通常是长期资产（例如三油低耗的百级前排），不能动
+
+        只在低耗轮换任务下生效，其余任务调用会直接跳过。
+
+        Returns:
+            int: 退役的舰船数量。
+        """
+        logger.info('[退役-保留] 退役低耗轮换的废弃先锋')
+
+        if not self.config.is_task_enabled('LowCostRotation'):
+            logger.info('[退役-保留] 非低耗轮换任务，跳过')
+            return 0
+
+        self.dock_favourite_set(wait_loading=False)
+        self.dock_sort_method_dsc_set(wait_loading=False)
+        self.dock_filter_set(index='dd', rarity='common', extra='not_level_max', sort='level')
+
+        # 与 retire_gems_farming_flagships() 同理：稀有度已由上面的筛选层限定，
+        # 扫描阶段再校验一次会让颜色采样异常的 'unknown' 卡被漏掉。
+        scanner = ShipScanner(fleet=0, status='free', level=(2, 99))
+        scanner.disable('emotion')
+        scanner.disable('rarity')
+
+        total = 0
+        skip_first_screenshot = True
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            self.handle_info_bar()
+            ships = scanner.scan(self.device.image)
+            if not ships:
+                # 没有符合的舰船，退出
+                break
+
+            for ship in ships:
+                self.device.click(ship.button)
+                self.device.sleep((0.1, 0.15))
+                total += 1
+
+            self._retirement_confirm()
+
+            # 少于 10 艘时快速退出
+            if len(ships) < 10:
+                break
+
+        # 退役完成，即将退出，无需等待加载
+        self.dock_filter_set(wait_loading=False)
+        logger.info(f'[退役-保留] 退役废弃先锋 {total} 艘')
         return total
 
     def handle_retirement(self):

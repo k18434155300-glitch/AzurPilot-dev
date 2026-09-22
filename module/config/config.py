@@ -216,7 +216,7 @@ class AzurLaneConfig(ConfigUpdater, ManualConfig, GeneratedConfig, ConfigWatcher
             func.startswith("Event")
             or func.startswith("Raid")
             or func.startswith("Coalition")
-            or func in ["MaritimeEscort", "GemsFarming", "ThreeOilLowCost"]
+            or func in ["MaritimeEscort", "GemsFarming", "ThreeOilLowCost", "LowCostRotation"]
         ):
             if "EventGeneral" not in func_list:
                 func_list.insert(0, "EventGeneral")

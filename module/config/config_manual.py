@@ -441,6 +441,10 @@ class ManualConfig:
     """
     DOCK_FULL_TRIGGERED = False
     GET_SHIP_TRIGGERED = False
+    # 低耗轮换：一批「连续作战」是否已打完。
+    # 由战役侧（LowCostCampaignBase.handle_total_rewards）置位，
+    # 任务侧（LowCostRotation.triggered_stop_condition）消费后复位。
+    LOW_COST_BATCH_FINISHED = False
     COMMON_CV_THRESHOLD = 0.9
 
     """

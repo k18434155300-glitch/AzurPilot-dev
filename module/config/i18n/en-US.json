@@ -74,6 +74,10 @@
       "name": "3-Oil Low Cost Plus",
       "help": "Use a 3-oil low-cost fleet to fight. Automatically replaces and retires the flagship when it reaches level 32."
     },
+    "LowCostRotation": {
+      "name": "Low cost rotation",
+      "help": "Form a fleet with a level 1 white carrier and a level 1 white destroyer, then use MULTIPLE SORTIES to clear a batch in one go and swap the whole fleet afterwards.\nEvery ship is a level 1 drop that is discarded after use, so there is no emotion management and nothing to preserve when retiring.\nNote: MULTIPLE SORTIES relies on auto search, which this task keeps enabled."
+    },
     "Ambush11": {
       "name": "Ambush 1-1",
       "help": ""
@@ -1928,6 +1932,24 @@
     "VanguardLevelMax": {
       "name": "Vanguard maximum level",
       "help": "Used to filter eligible white-rarity vanguard ships. Default is 125."
+    }
+  },
+  "LowCostRotation": {
+    "_info": {
+      "name": "Low cost rotation",
+      "help": ""
+    },
+    "SortiesCount": {
+      "name": "Sorties per run",
+      "help": "Number of sorties when using MULTIPLE SORTIES.\nGame cap is 10 (MAX): with 10 it just clicks MAX, below 10 it clicks MAX first then steps down with the minus button."
+    },
+    "FlagshipLevelMax": {
+      "name": "Flagship level cap",
+      "help": "Level cap of the common carrier used as flagship. Default 1, meaning only level 1 ships;\nraise it when no level 1 carrier is available."
+    },
+    "VanguardLevelMax": {
+      "name": "Vanguard level cap",
+      "help": "Level cap of the common destroyer used as vanguard. Default 1, meaning only level 1 ships;\nraise it when no level 1 destroyer is available."
     }
   },
   "EventGeneral": {

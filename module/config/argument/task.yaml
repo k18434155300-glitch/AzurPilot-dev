@@ -71,6 +71,16 @@ Farm:
       - Submarine
       - Emotion
       - EnemyPriority
+    LowCostRotation:
+      - Scheduler
+      - LowCostRotation
+      - GemsFarming
+      - Campaign
+      - StopCondition
+      - Fleet
+      - Submarine
+      - Emotion
+      - EnemyPriority
     Ambush11:
       - Scheduler
       - GemsFarming

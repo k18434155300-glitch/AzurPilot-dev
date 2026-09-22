@@ -674,6 +674,16 @@ GemsFarming:
   VanguardLevelMax:
     value: 125
     validate: [1, 125]
+LowCostRotation:
+  SortiesCount:
+    value: 10
+    validate: [1, 10]
+  FlagshipLevelMax:
+    value: 1
+    validate: [1, 125]
+  VanguardLevelMax:
+    value: 1
+    validate: [1, 125]
 # ==================== Event ====================
 
 EventGeneral:
