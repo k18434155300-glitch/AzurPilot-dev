@@ -741,10 +741,21 @@ class AzurLaneConfig(ConfigUpdater, ManualConfig, GeneratedConfig, ConfigWatcher
         Returns:
             bool: 是否需要切换任务。
         """
-        # 更新事件
+        # 更新事件：紧急停止不受 _disable_task_switch 影响，必须优先响应
         if self.stop_event is not None:
             if self.stop_event.is_set():
                 return True
+
+        # 禁用任务切换期间，不响应优先级切换。
+        #
+        # 这个判断必须放在这里，而不能只留在 `check_task_switch()` 里：
+        # 不少任务循环是**直接调 `task_switched()`** 的（例如
+        # `CampaignRun.run()`、`GemsFarming.run()` 等），绕过
+        # `check_task_switch()` 就等于绕过了那个开关——表现为
+        # 「已经设了 _disable_task_switch，抢占照样在任务中途生效」。
+        if getattr(self, '_disable_task_switch', False):
+            return False
+
         prev = getattr(self, '_task_switch_owner', self.task)
         self.load()
         new = self.get_next()

@@ -37,14 +37,14 @@
 
 from module.base.decorator import cached_property
 from module.base.timer import Timer
-from module.campaign.assets import BUILD_RETIRE, TOTAL_REWARDS, TOTAL_REWARDS_QUIT
+from module.campaign.assets import BUILD_RETIRE, OCR_OIL_CHECK, TOTAL_REWARDS, TOTAL_REWARDS_QUIT
 from module.campaign.gems_farming import GemsCampaignOverride, GemsEmotion, GemsFarming
 from module.campaign.run import CampaignRun
 from module.exception import CampaignEnd
 from module.handler.continuous_battle import ContinuousBattle
 from module.logger import logger
 from module.retire.assets import IN_RETIREMENT_CHECK
-from module.ui.page import page_build
+from module.ui.page import page_build, page_main
 
 
 class LowCostCampaignBase(GemsCampaignOverride, ContinuousBattle):
@@ -84,50 +84,22 @@ class LowCostCampaignBase(GemsCampaignOverride, ContinuousBattle):
         """
         if self.appear(TOTAL_REWARDS, offset=(20, 20), interval=2):
             logger.info('[低耗轮换] 出现合计奖励结算框，本批结束')
-            # 置位后由任务侧的 triggered_stop_condition() 消费，
-            # 让本轮结束、交回 run() 换编队
+            # 置位仅作为可选信号：这个框通常会被父类的
+            # handle_battle_status() 抢先点掉（点击区域重合），
+            # 本方法未必执行，判停不能依赖它（见 _rotation_loop）
             self.config.LOW_COST_BATCH_FINISHED = True
             self.device.click(TOTAL_REWARDS_QUIT)
             self.interval_reset(TOTAL_REWARDS)
             return True
         return False
 
-    def handle_battle_status(self, drop=None):
-        """处理战斗结算画面，处理完顺手清掉点击记录。
-
-        **这里的结算必须点**。曾按「中间结算游戏会自己过」的假设改成不处理，
-        实测立刻失败：`auto_search_combat_status()` 里的界面静止不动，
-        `stuck_timer`（60 秒）超时抛 `GameStuckError`，任务被判
-        「游戏状态无法推进」而重启游戏。也就是说连续作战中途的结算
-        并不会自动略过，仍然需要脚本推进。
-
-        但点了会撞上另一个保护：点击频率检测只看**最近 15 次**点击、
-        两个按钮各满 6 次即抛 `GameTooManyClickError`，而连续作战每场
-        固定 3 次点击（结算 + 经验 ×2），约 5 场就误报。
-        所以每处理完一次就清空记录，把连续作战的正常节奏与「脚本卡死」
-        区分开——真正的卡死仍有 `stuck_record_check` 兜底。
-
-        Args:
-            drop: 掉落记录对象，透传给父类。
-
-        Returns:
-            bool: 父类的处理结果。
-        """
-        result = super().handle_battle_status(drop=drop)
-        if result:
-            self.device.click_record_clear()
-        return result
-
-    def handle_exp_info(self):
-        """处理经验结算画面，处理完顺手清掉点击记录。理由同 `handle_battle_status()`。
-
-        Returns:
-            bool: 父类的处理结果。
-        """
-        result = super().handle_exp_info()
-        if result:
-            self.device.click_record_clear()
-        return result
+    # 中间各场的结算（BATTLE_STATUS_S / EXP_INFO_S）**沿用父类处理**，
+    # 也就是照常点击。理由：
+    #   · 点击本身不是问题——它是「不卡死」的原因（stuck_timer 靠点击重置），
+    #     卡死检测现已整体关闭，点击不再有任何副作用；
+    #   · 点了能推进流程，万一游戏某次真的停在结算界面上，不会干等；
+    #   · 顺带恢复 `drop.handle_add()`，中间各场的掉落统计也能记录。
+    # 需要区别对待的只有末尾的「合计获得奖励」，见 `handle_total_rewards()`。
 
     def handle_retirement(self):
         """打一批的过程中弹出「船坞已满」：处理掉弹窗后直接停止任务。
@@ -292,6 +264,14 @@ class LowCostRotation(GemsFarming):
         level_max = int(self.config.LowCostRotation_VanguardLevelMax)
         level_max = max(1, min(level_max, 124))   # 124 是上限，避开回退阈值 125
 
+        # 这里**不做**额外的 dock_reset()。
+        #
+        # 日志显示 `dock_filter.set()` 自身就会在同一个弹窗里先重置再设置
+        # （旗舰那段：同一弹窗内先点 FILTER_INDEX_0_0(all) 再点 _0_1(cv)），
+        # 而下面的 super() 调用默认 sort='level'，sort 也会被一并设回去。
+        # 多加一次 dock_reset() 只会白开一次筛选弹窗——实测编队阶段因此出现
+        # 两轮筛选操作，且分不清是先锋还是旗舰那一步在做。
+
         origin_min = self.config.GemsFarming_VanguardLevelMin
         origin_max = self.config.GemsFarming_VanguardLevelMax
         self.config.override(GemsFarming_VanguardLevelMin=1,
@@ -329,32 +309,54 @@ class LowCostRotation(GemsFarming):
             return
         super().vanguard_change_with_emotion(ship)
 
-    def triggered_stop_condition(self, oil_check=True):
-        """一批打完结束本轮；其余交给标准的停止条件。
+    def _wait_oil_icon(self, timeout=5) -> bool:
+        """等主界面资源栏出现石油图标，返回是否在超时前出现。
 
-        与三油低耗同思路：先判断自己的触发条件，再交给 super() 处理
-        石油、物资、运行次数、等级上限等通用条件——这样石油耗尽时才会
-        正常推迟任务，而不是一直刷下去。
-        区别是本任务没有 32 级与心情这两个条件，只有「一批是否打完」。
-
-        停止条件与三油低耗用同一套配置项（StopCondition 组：石油上限、
-        石油停止下限、物资上限、等级上限、获得新舰船、活动 PT、出击次数
-        等），这里不再做增删。
-
-        唯一区别是跳过 `GemsFarming` 那一层，直接调 `CampaignRun` 的版本：
-        低耗轮换用 1 级船、每批换新，不需要 32 级与心情这两个触发条件。
-        （「出击次数」在三油低耗里同样被 override 锁成 0 且界面隐藏，
-        两侧行为一致，无需额外处理。）
+        石油 / 物资都靠主界面顶部的资源栏读取。界面未就绪时
+        （例如 `page_main_white` 白屏过渡态）`OCR_OIL_CHECK` 位置的颜色
+        对不上，`_get_num()` 只是打个 warning 就**降级用错误参数做 OCR**，
+        读出乱码（实测读成 2），再被
+        `get_oil() < max(OilLimitHardFloor, OilLimit)` 判成「石油上限」。
+        所以判停之前先确认资源栏真的可读。
 
         Args:
-            oil_check (bool): 是否检查石油/物资等资源限制。
+            timeout (int): 秒。
 
         Returns:
-            bool: 是否结束本轮。
+            bool: 石油图标是否可见。
         """
-        if self.config.LOW_COST_BATCH_FINISHED:
-            logger.hr('[低耗轮换] 本批结束，准备换编队', level=1)
-            return True
+        timer = Timer(timeout, count=timeout).start()
+        while 1:
+            self.device.screenshot()
+            if self.appear(OCR_OIL_CHECK, offset=(10, 2)):
+                return True
+            if timer.reached():
+                return False
+
+    def triggered_stop_condition(self, oil_check=True):
+        """在父类判停之前，先确认资源栏可读。
+
+        `CampaignRun.run()` 的循环开头（run.py:504）会调用本方法，且：
+        * 它在 `campaign.run()` **之前**，所以面对的是上一次操作留下的界面；
+        * 那时的界面可能还没就绪（实测：`ui_goto(page_main)` 已经返回，
+          界面却仍是 `page_main_white`）。
+
+        此时 `get_oil()` 读不到值会返回乱码，而父类的判定是
+        `get_oil() < 上限` → 乱码小于阈值 → 误报「触发停止条件: 石油上限」
+        并把任务推迟 120~240 分钟（日志 09:01 实例）。
+
+        所以：**资源栏不可读时直接跳过石油 / 物资判定**，本轮不做这个决定，
+        交给下一次检查——比拿一个乱码当真要安全。
+
+        Args:
+            oil_check (bool): 是否检查石油 / 物资等资源限制。
+
+        Returns:
+            bool: 是否触发停止条件。
+        """
+        if oil_check and not self._wait_oil_icon():
+            logger.warning('[低耗轮换] 资源栏不可读（界面未就绪），跳过本次石油/物资判定')
+            return False
 
         return CampaignRun.triggered_stop_condition(self, oil_check=oil_check)
 
@@ -400,6 +402,30 @@ class LowCostRotation(GemsFarming):
             logger.error(f'[低耗轮换] 更换编队时发生异常，按「换不上船」处理：{e}')
             return False
 
+    def retire_gems_farming_flagships(self, keep_one=True) -> int:
+        """低耗轮换下强制「不保留」，把待退的普通航母全部退掉。
+
+        父类默认 `keep_one=True`（至少留一艘普通航母供后续编队用），但它的
+        判否分支是 `if len(ships) < 2: break`——**只剩 1 艘待退航母时会直接
+        跳过，一艘都不退**。
+
+        而这恰好是本任务的典型场景：退役范围是 `level=(2, 100)`，刚编进队的
+        那艘 1 级航母本就不在候选里，于是候选往往只剩「替换下来的高等级航母」
+        这一艘 → 被 break 掉，退不掉、一直堆在船坞。
+
+        低耗轮换不需要保留：下一批要用的 1 级航母刚刚已经编好队，
+        且按等级它也不会被选中。
+
+        Args:
+            keep_one (bool): 父类参数；本任务启用时强制为 False。
+
+        Returns:
+            int: 退役的舰船数量。
+        """
+        if self.config.is_task_enabled('LowCostRotation'):
+            keep_one = False
+        return super().retire_gems_farming_flagships(keep_one=keep_one)
+
     def retire_after_rotation(self):
         """主动退役：主界面 ->「建造」-> 点左下角「退役」-> 退役 -> 退出。
 
@@ -420,32 +446,67 @@ class LowCostRotation(GemsFarming):
         再直接点标签的固定坐标即可——界面布局不变，坐标就是可靠的。
         """
         logger.hr('[低耗轮换] 退役', level=1)
-        self.ui_ensure(page_build)
-
-        # 不做 appear(BUILD_RETIRE)：背景会变，模板不可靠；
-        # 已确认处于建造界面，直接点标签位置
-        self.device.click(BUILD_RETIRE)
-
-        # 等待进入退役界面，超时则跳过本次退役
-        timeout = Timer(5, count=5).start()
-        while 1:
-            self.device.screenshot()
-
-            if self.appear(IN_RETIREMENT_CHECK, offset=(20, 20)):
-                break
-            if timeout.reached():
-                logger.warning('[低耗轮换] 未进入退役界面，跳过本次退役')
-                return
+        if not self._retirement_enter():
+            return
 
         # 先一键退役。其内部已包含「退役报废的旗舰」（打过、等级升上去的
         # 白皮航母），这一步负责清掉船坞里的杂鱼。
         self._retire_handler()
+
+        # 「退役废弃旗舰」结束时界面**已经退出了退役界面**（20:13 实测）。
+        # 而退役先锋还要继续操作船坞里的排序 / 筛选开关——界面不对时这些开关
+        # 会被判定为 unknown，于是反复点击（先是 Favourite_filter，后是
+        # Dork_sorting，都刷屏到日志结束）。这里重新进入一次。
+        self._retirement_enter()
 
         # 再退役本轮换下来的先锋：1 级驱逐打完一批会升级，属于用完即弃的
         # 一次性船，不清掉会一直堆在船坞里。放在一键退役之后做。
         self.retire_low_cost_vanguards()
 
         self._retirement_quit()
+
+        # 退役收尾后回到主界面。
+        #
+        # `_retirement_quit()` 只是关掉退役弹窗，界面此时停在「建造」页；
+        # 不回主界面的话，下一轮无论是继续出击还是响应抢占都无从导航
+        # （实测就卡在这里，既不继续战斗也不响应抢占）。
+        self.ui_goto(page_main)
+        # 再等一次界面稳定。`ui_goto` 刚返回时可能还停在 page_main_white
+        # （白屏过渡态），此时资源栏尚未渲染——紧接着的停止条件检查要读
+        # 石油/物资，读不到会返回 0，于是「0 < 石油下限」被误判成
+        # 「触发停止条件: 石油上限」（22:15 实测：无石油图标 / OCR_OIL 读 0 /
+        # 界面为 page_main_white），任务提前收工。
+        self.ui_ensure(page_main)
+
+    def _retirement_enter(self) -> bool:
+        """确保处于退役界面。
+
+        进入方式见 `retire_after_rotation()` 的说明：不用模板匹配「退役」入口
+        （它是半透明标签、会透出随活动变化的背景），而是确认已在建造界面后
+        直接点标签的固定坐标。
+
+        退役流程里会调用两次：第一次是正常进入；第二次是在「退役废弃旗舰」
+        之后——那一步结束时界面已经退出了退役界面，而退役先锋还要继续操作
+        船坞开关。
+
+        Returns:
+            bool: 是否已处于退役界面。
+        """
+        self.device.screenshot()
+        if self.appear(IN_RETIREMENT_CHECK, offset=(20, 20)):
+            return True
+
+        self.ui_ensure(page_build)
+        self.device.click(BUILD_RETIRE)
+
+        timeout = Timer(5, count=5).start()
+        while 1:
+            self.device.screenshot()
+            if self.appear(IN_RETIREMENT_CHECK, offset=(20, 20)):
+                return True
+            if timeout.reached():
+                logger.warning('[低耗轮换] 未进入退役界面，跳过本次退役')
+                return False
 
     def run(self, name, folder='campaign_main', mode='normal', total=0):
         """
@@ -464,42 +525,71 @@ class LowCostRotation(GemsFarming):
         self.config.override(Campaign_Name=name, Campaign_Event=folder)
         self.load_campaign(name, folder)
 
-        # 连续作战全程「长时间没有任何点击」，会反复踩中设备层的卡死判定：
+        # 卡死/连击检测的豁免**只在「打一批」期间**生效，见
+        # `_continuous_battle_guards_off()`。
         #
-        #   1. stuck_timer（60s 无点击）—— 一场战斗全程无点击，打满一分钟就误报。
-        #      它只能靠点击重置（screenshot 不重置它）；本以为能兜底的
-        #      `stuck_long_wait_list`（PAUSE / BATTLE_STATUS_S 等）实际是失效的：
-        #      `detect_record_add()` 全项目没有任何调用点，detect_record 恒为空集，
-        #      豁免分支永远进不去（device.py:87 / 400 / 471）。
-        #   2. stuck_timer_long（195s）—— 到了之后会**绕过豁免直接报错**，是硬线。
-        #   3. _stuck_image_timer（30s 画面不变）—— 战斗加载、结算画面会长时间静止。
-        #   4. click_record（15 次窗，两按钮各 6 次）—— 每场固定 3 次点击，约 5 场就爆。
-        #
-        # 调度器对卡死类异常的处理是「重启游戏，重复则重启模拟器」，
-        # 而这四处每一次触发都只是连续作战的正常节奏，纯属误报。
-        # 所以整个任务期间直接**关掉这三套检测**——这批任务的界面节奏本来就是
-        # 已知的，不需要通用保护兜底——退出时原样还原。
-        #
-        # 代价：游戏真卡死（崩溃、断网）时本任务不会自动重启恢复，需要人工介入。
-        original_checks = (
-            self.device.click_record_check,
-            self.device.stuck_record_check,
-            self.device._check_image_stuck,
+        # 收尾（换编队、退役）都是常规 UI 操作、没有静默期，检测保持开启——
+        # 否则像「开关状态判定为 unknown 导致反复点击」这类问题不会报错，
+        # 只会永久卡住（18:17 实测：Favourite_filter 刷屏到日志结束）。
+        self._rotation_loop(name, folder, mode, total)
+
+    def _continuous_battle_guards_off(self):
+        """进入连续作战：关掉会误报的卡死/连击检测，并把截图放宽到 1 秒。
+
+        连续作战整批由游戏自己连打、脚本只是旁观，期间：
+
+          1. stuck_timer（60s 无点击）—— 单场战斗全程无点击必然触发。它只能靠
+             点击重置，而 stuck_long_wait_list 的豁免实际失效（detect_record_add()
+             全项目无调用点，device.py:87 / 400 / 471）
+          2. stuck_timer_long（195s）—— 到了会绕过豁免直接报错，是硬线
+          3. _stuck_image_timer（30s 画面不变）—— 加载 / 结算画面长时间静止
+          4. click_record（15 次窗，两按钮各 6 次）—— 每场固定 3 次点击
+
+        **只在「打一批」期间关**：收尾是常规 UI 操作、没有静默期，检测必须
+        开回来，否则「反复点击」不会超时报错，只会永久卡住（18:17 实测）。
+
+        Returns:
+            tuple: 还原所需的原方法，交给 `_continuous_battle_guards_restore()`。
+        """
+        device = self.device
+        original = (
+            device.click_record_check,
+            device.stuck_record_check,
+            device._check_image_stuck,
+            device.screenshot_interval_set,
         )
-        self.device.disable_stuck_detection()                   # 关掉前两个
-        self.device._check_image_stuck = lambda *a, **kw: None  # 关掉画面不变检测
-        try:
-            self._rotation_loop(name, folder, mode, total)
-        finally:
-            (self.device.click_record_check,
-             self.device.stuck_record_check,
-             self.device._check_image_stuck) = original_checks
+
+        device.disable_stuck_detection()                    # 前两个
+        device._check_image_stuck = lambda *a, **kw: None   # 画面不变检测
+
+        original_set = device.screenshot_interval_set
+
+        def slow_screenshot_interval(interval=None):
+            # 改配置行不通：screenshot_interval_set(None) 会把值 limit 到 0.3 以内
+            # （screenshot.py:237），只有传具体数字才不设限（250-252 行）
+            if interval is None or interval == 'combat':
+                interval = 1.0
+            original_set(interval)
+
+        device.screenshot_interval_set = slow_screenshot_interval
+        return original
+
+    def _continuous_battle_guards_restore(self, original):
+        """还原 `_continuous_battle_guards_off()` 关掉的东西。
+
+        Args:
+            original (tuple): `_continuous_battle_guards_off()` 的返回值。
+        """
+        (self.device.click_record_check,
+         self.device.stuck_record_check,
+         self.device._check_image_stuck,
+         self.device.screenshot_interval_set) = original
 
     def _rotation_loop(self, name, folder, mode, total):
         """分批循环主体。
 
-        单独抽成方法，是为了让 `run()` 能用 `try/finally` 包住卡死阈值的放宽，
-        即使异常退出也能还原。
+        单独抽成方法，是为了让 `run()` 更清晰；检测豁免的开关由本方法
+        按阶段控制（只在「打一批」期间关闭）。
 
         Args:
             name (str): 战役文件名。
@@ -533,12 +623,48 @@ class LowCostRotation(GemsFarming):
             # 取舍：高优先级任务最多要等「一批 + 收尾」的时间。
             with self.config.temporary(_disable_task_switch=True):
                 # 打一批：进图后在舰队选择界面点「连续作战」，
-                # 由游戏自己连打，直到弹出「合计获得奖励」结算框
+                # 由游戏自己连打，直到弹出「合计获得奖励」结算框。
+                #
+                # total 固定传 1：CampaignRun.run() 的退出条件是
+                # `if total and self.run_count >= total`（run.py:456），
+                # 传 0 等于不设上限——它会打完这轮接着打下一次，
+                # 永远不返回，本任务的换编队与退役就再也轮不到。
+                # 传 1 让它在本轮（一次连续作战）结束后交还控制权。
+                # 打一批之前先回到主界面。
+                #
+                # `CampaignRun.run()` 的循环开头就会检查停止条件
+                # （run.py:504），而那个检查要读石油 / 物资——两者都依赖
+                # 主界面顶部的资源栏。此时界面若是上一次操作留下的
+                # （例如初次编队刚结束、停在编队页），`OCR_OIL_CHECK` 的
+                # 颜色检查会失败，`_get_num()` 便降级用错误参数做 OCR，
+                # 读出乱码（实测读成 2），再被
+                # `get_oil() < max(OilLimitHardFloor, OilLimit)` 误判成
+                # 「触发停止条件: 石油上限」，任务被推迟 120~240 分钟。
+                #
+                # 日志（09:01）：意外的OCR_OIL_CHECK颜色 → 无石油图标
+                # → [OCR_OIL] 2 → 触发停止条件: 石油上限。
+                self.ui_ensure(page_main)
+
+                # 豁免只覆盖这一句——连续作战全程静默，通用保护必然误报
+                guards = self._continuous_battle_guards_off()
                 try:
-                    CampaignRun.run(self, name=name, folder=folder, total=total)
+                    CampaignRun.run(self, name=name, folder=folder, total=1)
                 except CampaignEnd:
                     # 一批打完（或撤退）属于正常结束
                     pass
+                finally:
+                    # 收尾之前恢复检测。换编队 / 退役都是常规 UI 操作，
+                    # 需要靠检测把「开关 unknown 导致反复点击」暴露出来，
+                    # 否则它不会超时报错，只会永久卡住（18:17 实测）。
+                    self._continuous_battle_guards_restore(guards)
+
+                # 本轮（一次连续作战）到此结束。
+                #
+                # 顺带说明：「合计获得奖励」框通常不是本任务的
+                # `handle_total_rewards()` 处理的——它与普通结算框点击区域重合，
+                # 父类的 `handle_battle_status()` 会先命中并点掉（点了离开、
+                # 回到出击界面）。所以 `LOW_COST_BATCH_FINISHED` 未必会被置位，
+                # 外层判停不能只依赖它，见下面的 explicit 检查。
 
                 # 收尾：先替换编队、再退役（顺序不能反）。
                 # 即便本轮是因为石油/物资/次数等条件提前退出的，也先把收尾做完——
@@ -562,7 +688,16 @@ class LowCostRotation(GemsFarming):
                 self.campaign.ensure_auto_search_exit()
                 self.config.task_stop()
 
-            # 收尾做完后，再判断是不是该收工了
-            if not self.config.LOW_COST_BATCH_FINISHED:
+            # 收尾做完后，再判断是不是该收工了。
+            #
+            # 这里走的也是 `self.triggered_stop_condition()`，即本任务的覆写版
+            # ——与 `CampaignRun.run()` 循环开头那次（run.py:504）共用同一套
+            # 「资源栏不可读就跳过判定」的保护（见该方法的说明）。
+            #
+            # 注：`LOW_COST_BATCH_FINISHED` 不参与判停——「合计获得奖励」框
+            # 常被父类的 `handle_battle_status()` 抢先处理，标记不置位。
+            # 「本批是否打完」由 `total=1` 保证（CampaignRun.run() 打一轮
+            # 就返回），两者各司其职。
+            if self.triggered_stop_condition(oil_check=True):
                 logger.info('[低耗轮换] 达到停止条件（资源或运行次数），已完成收尾，结束任务')
                 break

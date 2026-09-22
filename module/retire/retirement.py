@@ -530,7 +530,13 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
             logger.info('[退役-保留] 非低耗轮换任务，跳过')
             return 0
 
-        self.dock_favourite_set(wait_loading=False)
+        # 注意：**不要**在这里调 dock_favourite_set()。
+        #
+        # 本函数紧跟在「退役废弃旗舰」之后执行，而那边已经关过收藏筛选，
+        # 中间也没有人再打开。实测此时再调一次，船坞卡片刚刷新完、界面尚未稳定，
+        # 开关会被判定为 unknown，Switch 便反复点击 COMMON_SHIP_FILTER_DISABLE。
+        # 由于低耗轮换关闭了卡死检测，这种反复点击不会超时——任务就此永久卡住
+        # （日志：18:17:48 起 [Favourite_filter] unknown 刷屏到日志结束）。
         self.dock_sort_method_dsc_set(wait_loading=False)
         self.dock_filter_set(index='dd', rarity='common', extra='not_level_max', sort='level')
 
