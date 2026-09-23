@@ -61,16 +61,6 @@ GIT=./bootstrap/git/cmd/git.exe     # 白名单内，清理后仍在
 
 配置在 `E:\AzurPilot\config\ap.json`（**白名单内，不会被清理**）。
 
-### 抢占式调度
-
-| 键 | 值 |
-| --- | --- |
-| `TaskPreemptionEnabled` | `true` |
-| `TaskPreemptionCheckInterval` | `60` |
-| `TaskPreemptionAllowlist` | 未设置（不限任务） |
-
-调整工具：`tools/preemption_config.py`。
-
 ### 任务优先级
 
 `TaskPriorityAdjustment` 共 77 条，一维线性表，越靠前优先级越高。关键名次：
