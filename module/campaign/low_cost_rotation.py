@@ -607,9 +607,25 @@ class LowCostRotation(GemsFarming):
     def _continuous_battle_guards_restore(self, original):
         """还原 `_continuous_battle_guards_off()` 关掉的东西。
 
+        **还原之前必须先清空点击 / 卡死记录**。
+
+        关闭检测只关掉了「判定」这一半，`click_record` 的**记录**照旧在攒：
+        连续作战每场固定 3 次点击（结算 + 经验 ×2），一整批下来
+        `EXP_INFO_S`、`GET_SHIP` 各能攒到 6 次上下。若不清就直接恢复检测，
+        收尾的第一次判定就会扫到这批历史，命中
+        `GameTooManyClickError`（两按钮各 ≥6 次）——
+        实测 16:12：`更换整套 1 级编队` 刚起步就报
+        「两个按钮交替点击次数过多: EXP_INFO_S, GET_SHIP」，
+        被 `_change_fleet_safely()` 归为「换不上船」，任务停止并延迟 30 分钟。
+
+        那些点击全是连续作战的正常节奏，与「脚本卡死」无关，必须丢掉。
+
         Args:
             original (tuple): `_continuous_battle_guards_off()` 的返回值。
         """
+        self.device.click_record_clear()
+        self.device.stuck_record_clear()
+
         (self.device.click_record_check,
          self.device.stuck_record_check,
          self.device._check_image_stuck,
