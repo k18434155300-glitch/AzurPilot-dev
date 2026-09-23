@@ -295,6 +295,9 @@ class LowCostRotation(GemsFarming):
         """
         if ship and all(s.fleet == self.fleet_to_attack for s in ship):
             logger.info('[低耗轮换] 当前旗舰已符合要求，跳过更换')
+            # 同 vanguard_change_with_emotion()：跳过时界面还停在船坞，
+            # 要带回编队页，避免后续操作从 page_dock 绕经 page_main。
+            self.ui_back(self.page_fleet_check_button)
             return
         super().flagship_change_with_emotion(ship)
 
@@ -306,6 +309,17 @@ class LowCostRotation(GemsFarming):
         """
         if ship and all(s.fleet == self.fleet_to_attack for s in ship):
             logger.info('[低耗轮换] 当前先锋已符合要求，跳过更换')
+            # 跳过时**也必须把界面带回编队页**。
+            #
+            # 本方法的调用方 vanguard_change_execute() 契约是
+            # `in: page_fleet / out: page_fleet`；父类走到这里时界面已经在船坞
+            # （此前 dock_enter() 进来的），正常路径靠 _ship_change_confirm() 里
+            # 的 dock_select_confirm(check_button=...) 带回编队页。
+            # 直接 return 会把界面留在 page_dock，随后换旗舰时
+            # ui_ensure(page_fleet) 只能从船坞绕经 page_main 再回编队页
+            # （日志 07:55:50：page_dock → page_main → page_fleet，
+            #  白点了一次 GOTO_MAIN）。
+            self.ui_back(self.page_fleet_check_button)
             return
         super().vanguard_change_with_emotion(ship)
 
@@ -429,12 +443,23 @@ class LowCostRotation(GemsFarming):
     def retire_after_rotation(self):
         """主动退役：主界面 ->「建造」-> 点左下角「退役」-> 退役 -> 退出。
 
-        退役分两步，顺序固定：
+        **整个流程只进出退役界面一次**，顺序：
 
-        1. `retire_handler()` 一键退役，清掉船坞里的杂鱼
-           （其内部还会退役报废的旗舰，即打过、等级升上去的白皮航母）
-        2. `retire_low_cost_vanguards()` 退役本轮换下来的先锋
+        1. `retire_ships_one_click()` 一键退役——批量操作，先清掉大部分，
+           后面要逐艘处理的就少了
+        2. `retire_gems_farming_flagships()` 退役报废旗舰（打过、等级升上去的
+           白皮航母）；本任务覆写会强制 `keep_one=False`
+        3. `retire_low_cost_vanguards()` 退役本轮换下来的先锋
            （等级 2~99 的白皮驱逐；1 级的留着下一批用）
+        4. `_retirement_quit()` + 回主界面
+
+        **不使用 `_retire_handler()`**：它把「一键退役 + 旗舰退役」打包好了，
+        但结尾会自己 `_retirement_quit()` 退出退役界面（retirement.py:726），
+        而本任务后面还要在这个界面上继续操作船坞开关，于是就得「退出去再重进」
+        一趟。这里改用它的两个组成部分，把退出动作挪到最后统一做。
+
+        顺序上**一键退役必须在前**：它是批量点选，先清一遍能让后面两个
+        （都要逐艘扫描点击）处理的船更少；反过来会让整个退役变慢。
 
         必须在 `change_fleet()` 之后调用：换下来的旧船这时才回到船坞，
         一键退役才能选中它们。
@@ -449,27 +474,33 @@ class LowCostRotation(GemsFarming):
         if not self._retirement_enter():
             return
 
-        # 先一键退役。其内部已包含「退役报废的旗舰」（打过、等级升上去的
-        # 白皮航母），这一步负责清掉船坞里的杂鱼。
-        self._retire_handler()
+        # ① 一键退役：批量操作，先清掉大部分，后面要逐艘处理的就少了。
+        #
+        # **不用 `_retire_handler()`**：它的结尾会 `_retirement_quit()` 退出
+        # 退役界面（retirement.py:726），而本任务后面还要在退役界面上继续操作
+        # 船坞开关，那样就得「退出去再重进」一趟。
+        # 这里改用它的两个组成部分，并把退出动作挪到整个流程的最后。
+        total = self.retire_ships_one_click()
+        if not total:
+            # 照 `_retire_handler()` 的做法重试一次（重置收藏与筛选）
+            logger.warning('[低耗轮换] 一键退役未退到船，重置筛选后重试')
+            self.dock_favourite_set(False, wait_loading=False)
+            self.dock_filter_set()
+            total = self.retire_ships_one_click()
 
-        # 「退役废弃旗舰」结束时界面**已经退出了退役界面**（20:13 实测）。
-        # 而退役先锋还要继续操作船坞里的排序 / 筛选开关——界面不对时这些开关
-        # 会被判定为 unknown，于是反复点击（先是 Favourite_filter，后是
-        # Dork_sorting，都刷屏到日志结束）。这里重新进入一次。
-        self._retirement_enter()
+        # ② 退役报废旗舰（打过、等级升上去的白皮航母）。
+        #    本任务的覆写会把 keep_one 强制为 False。
+        self.retire_gems_farming_flagships(keep_one=total > 0)
 
-        # 再退役本轮换下来的先锋：1 级驱逐打完一批会升级，属于用完即弃的
-        # 一次性船，不清掉会一直堆在船坞里。放在一键退役之后做。
+        # ③ 退役本轮换下来的先锋（1 级驱逐打完一批会升级，用完即弃）
         self.retire_low_cost_vanguards()
 
-        self._retirement_quit()
-
-        # 退役收尾后回到主界面。
+        # ④ 整个流程只在这里退出退役界面。
         #
-        # `_retirement_quit()` 只是关掉退役弹窗，界面此时停在「建造」页；
+        # `_retirement_quit()` 关掉退役弹窗，界面回到「建造」页；
         # 不回主界面的话，下一轮无论是继续出击还是响应抢占都无从导航
         # （实测就卡在这里，既不继续战斗也不响应抢占）。
+        self._retirement_quit()
         self.ui_goto(page_main)
         # 再等一次界面稳定。`ui_goto` 刚返回时可能还停在 page_main_white
         # （白屏过渡态），此时资源栏尚未渲染——紧接着的停止条件检查要读
@@ -485,9 +516,8 @@ class LowCostRotation(GemsFarming):
         （它是半透明标签、会透出随活动变化的背景），而是确认已在建造界面后
         直接点标签的固定坐标。
 
-        退役流程里会调用两次：第一次是正常进入；第二次是在「退役废弃旗舰」
-        之后——那一步结束时界面已经退出了退役界面，而退役先锋还要继续操作
-        船坞开关。
+        `retire_after_rotation()` 全程只调用它一次——退役步骤都改成了不自行退出
+        界面的写法，退出动作统一放在流程末尾。
 
         Returns:
             bool: 是否已处于退役界面。
