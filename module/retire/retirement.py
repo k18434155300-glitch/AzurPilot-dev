@@ -448,7 +448,11 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         gems_farming_enable: bool = (
                 self.config.is_task_enabled('GemsFarming')
                 or self.config.is_task_enabled('ThreeOilLowCost')
-                or self.config.is_task_enabled('LowCostRotation')
+                # 低耗轮换用 `task`（当前正在跑的任务）而不是 `is_task_enabled`：
+                # 后者读的是「配置里是否勾选」，而 `Retirement` 是 `Combat` 的基类，
+                # 任何打船坞满弹窗的任务（大世界 OpsiScheduling 等）都会走进来，
+                # 于是别的任务会替低耗轮换退役、把它的备用品一起退掉。
+                or self.config.task == 'LowCostRotation'
         )
         if not gems_farming_enable:
             logger.info('[退役-保留] 非钻石打捞/三油低耗/低耗轮换任务，跳过')
@@ -526,7 +530,15 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         """
         logger.info('[退役-保留] 退役低耗轮换的废弃先锋')
 
-        if not self.config.is_task_enabled('LowCostRotation'):
+        # 用 `task`（当前正在跑的任务）而不是 `is_task_enabled`。
+        #
+        # `is_task_enabled('LowCostRotation')` 读的是「配置里有没有勾选它」，
+        # 只要用户勾了就一直为真——而 `Retirement` 是 `Combat` 的基类，
+        # 任何会碰到「船坞满」弹窗的任务都会调到这里（大世界 OpsiScheduling 等）。
+        # 实测后果：低耗轮换因为换编队失败停下后，别的任务在跑的过程中
+        # 替它执行了这套退役，把船坞里留给下一批用的白皮船一并退光
+        # （9/25 12:03 OpsiScheduling 那 20 分钟）。
+        if self.config.task != 'LowCostRotation':
             logger.info('[退役-保留] 非低耗轮换任务，跳过')
             return 0
 

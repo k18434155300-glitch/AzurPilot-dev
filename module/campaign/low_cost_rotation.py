@@ -168,7 +168,9 @@ class LowCostRotation(GemsFarming):
 
     def dock_filter_set(self, sort='level', index='all', faction='all',
                         rarity='all', extra='no_limit', wait_loading=True):
-        """把取船时的「可突破」筛选换成「不限」。
+        """改写两处筛选：`extra` 换成「不限」，并且**不更改排序**。
+
+        一、把取船时的「可突破」筛选换成「不限」
 
         低耗轮换要的是 1 级船，而**1 级船不能限界突破**，于是但凡勾上
         `extra='can_limit_break'`，它们就会被整批排除，表现为「船坞里
@@ -187,12 +189,41 @@ class LowCostRotation(GemsFarming):
 
         退役流程用的 `not_level_max`、强化流程用的 `enhanceable` 都不在
         替换范围内，行为不受影响。
+
+        二、不更改排序（`sort=None`）
+
+        `FILTER_SORT_1_0`（即 `level`，同时也是默认值）的激活态在本环境识别
+        不了：它本来就已经选中，`show_active_buttons()` 却判断不出，于是反复
+        点击，先打印「设置 DOCK 选项超时」，再累积到
+        `GameTooManyClickError`——实测连点 12 次，整个换编队因此失败
+        （9/25 12:01：`按钮点击次数过多: FILTER_SORT_1_0` → 被
+        `_change_fleet_safely()` 归为「换不上船」→ 任务停止并延迟 30 分钟）。
+
+        排序只影响船坞显示顺序，不影响筛选结果；等级上限已由
+        `ShipScanner(level=...)` 收窄，取到哪一艘都符合要求。所以干脆不动它
+        ——传入的 `sort` 参数因此被忽略。
+
+        注意**不能**简单地把 `sort=None` 传给 `super()`：`Setting.set()` 开头是
+        ```python
+        if self.reset_first:
+            self._set_execute()      # 无参数 = 全部恢复默认
+        self._set_execute(**kwargs)
+        ```
+        `reset_first` 默认为 True，那次「恢复默认」会把排序打回 `level`，
+        于是照样点 `FILTER_SORT_1_0`。因此这里绕开 `set()`，直接用它的两个
+        组成部分，并且在两步里都不带 `sort`。
         """
         if extra == 'can_limit_break':
             extra = 'no_limit'
-        return super().dock_filter_set(sort=sort, index=index, faction=faction,
-                                       rarity=rarity, extra=extra,
-                                       wait_loading=wait_loading)
+
+        # 与 Setting.set() 等价，但全程不碰排序：
+        # 先恢复这四项的默认值，再设为目标值。
+        self.dock_filter_enter()
+        self.dock_filter._set_execute(
+            index='all', faction='all', rarity='all', extra='no_limit')
+        self.dock_filter._set_execute(
+            index=index, faction=faction, rarity=rarity, extra=extra)
+        self.dock_filter_confirm(wait_loading=wait_loading)
 
     def get_common_rarity_cv(self, lv=None, emotion=0):
         """取普通航母作旗舰，不关心心情。
