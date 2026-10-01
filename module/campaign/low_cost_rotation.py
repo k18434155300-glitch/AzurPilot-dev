@@ -35,8 +35,10 @@
 `LowCostCampaignBase.handle_total_rewards()`。
 """
 
+from module.base.button import Button
 from module.base.decorator import cached_property
 from module.base.timer import Timer
+from module.base.utils import color_similar, get_color
 from module.campaign.assets import BUILD_RETIRE, OCR_OIL_CHECK, TOTAL_REWARDS, TOTAL_REWARDS_QUIT
 from module.campaign.gems_farming import GemsCampaignOverride, GemsEmotion, GemsFarming
 from module.campaign.run import CampaignRun
@@ -44,6 +46,25 @@ from module.exception import CampaignEnd
 from module.handler.continuous_battle import ContinuousBattle
 from module.logger import logger
 from module.retire.assets import IN_RETIREMENT_CHECK
+
+# 建造界面左侧栏「退役」标签的候选位置 (x0, y0, x1, y1)。
+#
+# 左侧栏的图标数量**随「是否有活动」变化**：活动期间会多出一个活动图标，
+# 把「退役」挤到下一格（实测下移约 100 像素）。因此不能只用固定坐标——
+# 活动一结束就点空了（2026-10-01 实测如此）。
+#
+# 两种布局都列出，运行时取颜色对得上的那个：
+#   · 无活动  （2026-10-01 实测，1280x720 原图采样）：y = 450~504
+#   · 有活动  （2026-09-21 提取，即既有 BUILD_RETIRE）：y = 549~603
+#
+# 之所以比对**颜色**而不是模板：这个标签是半透明的，会透出建造界面的背景图，
+# 背景又随活动更替变化，模板匹配的结果不稳定（既有 BUILD_RETIRE 的模板就因此
+# 失效了）。而标签本身的灰色受背景影响小得多。
+BUILD_RETIRE_TAB_AREAS = (
+    (36, 450, 67, 504),     # 无活动
+    (36, 549, 67, 603),     # 有活动
+)
+BUILD_RETIRE_TAB_COLOR = (76, 87, 98)
 from module.ui.page import page_build, page_main
 
 
@@ -558,7 +579,9 @@ class LowCostRotation(GemsFarming):
             return True
 
         self.ui_ensure(page_build)
-        self.device.click(BUILD_RETIRE)
+        if not self._click_retire_tab():
+            logger.warning('[低耗轮换] 未找到「退役」标签，跳过本次退役')
+            return False
 
         timeout = Timer(5, count=5).start()
         while 1:
@@ -568,6 +591,35 @@ class LowCostRotation(GemsFarming):
             if timeout.reached():
                 logger.warning('[低耗轮换] 未进入退役界面，跳过本次退役')
                 return False
+
+    def _click_retire_tab(self) -> bool:
+        """点建造界面左侧栏的「退役」标签。
+
+        位置不固定（见 `BUILD_RETIRE_TAB_AREAS` 的说明），所以遍历候选区域，
+        取颜色匹配的那一个点下去。都不匹配则返回 False——比闭着眼睛点一个
+        固定坐标要好，后者在活动结束后只会点空、然后干等超时。
+
+        Returns:
+            bool: 是否点到了「退役」标签。
+        """
+        self.device.screenshot()
+        for area in BUILD_RETIRE_TAB_AREAS:
+            color = get_color(self.device.image, area)
+            if color_similar(color, BUILD_RETIRE_TAB_COLOR):
+                logger.info(f'[低耗轮换] 在位置 {area} 找到「退役」标签（颜色 {color}）')
+                # Device.click() 要的是 Button 对象（内部取 .button 再随机取点），
+                # 直接传 tuple 会抛
+                # `AttributeError: 'tuple' object has no attribute 'button'`。
+                # 这里就地构造，不带 file——只用颜色，不做模板匹配。
+                self.device.click(Button(
+                    area=area, color=BUILD_RETIRE_TAB_COLOR, button=area,
+                    name='BUILD_RETIRE_TAB'))
+                return True
+
+        logger.warning(
+            f'[低耗轮换] 「退役」标签不在任何候选位置，'
+            f'采样到的颜色为 {[get_color(self.device.image, a) for a in BUILD_RETIRE_TAB_AREAS]}')
+        return False
 
     def run(self, name, folder='campaign_main', mode='normal', total=0):
         """
