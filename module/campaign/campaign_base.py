@@ -201,6 +201,17 @@ class CampaignBase(CampaignUI, Map, AutoSearchCombat):
 
         return result
 
+    def handle_total_rewards(self):
+        """处理「合计获得奖励」结算框。
+
+        默认不处理，返回 False。需要它的任务覆写此方法：检测到结算框时
+        自行点击离开并返回 True，调用方会重新截图。
+
+        Returns:
+            bool: True 表示已处理结算框。
+        """
+        return False
+
     def run(self):
         """执行完整的战役流程。
 

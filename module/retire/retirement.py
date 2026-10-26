@@ -449,9 +449,19 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         """
         logger.info('[退役-保留] 退役钻石打捞/三油低耗的废弃旗舰')
 
-        gems_farming_enable: bool = self.config.is_task_enabled('GemsFarming') or self.config.is_task_enabled('ThreeOilLowCost')
+        # 低耗轮换同样适用：它的旗舰也是 1 级白皮航母，一批打完升级后需要清掉
+        gems_farming_enable: bool = (
+                self.config.is_task_enabled('GemsFarming')
+                or self.config.is_task_enabled('ThreeOilLowCost')
+                # 低耗轮换用「当前正在跑的任务」而不是 `is_task_enabled`：
+                # 后者读的是「配置里是否勾选」，而 `Retirement` 是 `Combat` 的基类，
+                # 任何打船坞满弹窗的任务（大世界 OpsiScheduling 等）都会走进来，
+                # 于是别的任务会替低耗轮换执行退役。
+                # 取 `task.command`——`config.task` 是 `Function` 对象。
+                or getattr(self.config.task, 'command', None) == 'LowCostRotation'
+        )
         if not gems_farming_enable:
-            logger.info('[退役-保留] 非钻石打捞/三油低耗任务，跳过')
+            logger.info('[退役-保留] 非钻石打捞/三油低耗/低耗轮换任务，跳过')
             return 0
 
         self.dock_favourite_set(wait_loading=False)
@@ -504,6 +514,86 @@ class Retirement(Enhancement, QuickRetireSettingHandler):
         # 退役完成，即将退出，无需等待加载
         self.dock_filter_set(wait_loading=False)
 
+        return total
+
+    def retire_low_cost_vanguards(self) -> int:
+        """退役低耗轮换用过的先锋（普通驱逐）。
+
+        与 `retire_gems_farming_flagships()` 对称：那个负责旗舰（航母），
+        这个负责先锋（驱逐）。三油低耗的前排是百级驱逐、属于长期资产，
+        本来不需要退役；而低耗轮换的前排是 1 级驱逐、一批打完就整套换掉，
+        属于用完即弃的一次性船，必须清掉。
+
+        退役范围是等级 2~99 的白皮驱逐：
+
+        - 1 级的留着下一批用（下一批要从船坞里挑 1 级驱逐）
+        - 100 级的通常是长期资产（例如三油低耗的百级前排），不能动
+
+        只在低耗轮换任务下生效，其余任务调用会直接跳过。
+
+        Returns:
+            int: 退役的舰船数量。
+        """
+        logger.info('[退役-保留] 退役低耗轮换的废弃先锋')
+
+        # 用 `task`（当前正在跑的任务）而不是 `is_task_enabled`。
+        #
+        # `is_task_enabled('LowCostRotation')` 读的是「配置里有没有勾选它」，
+        # 只要用户勾了就一直为真——而 `Retirement` 是 `Combat` 的基类，
+        # 任何会碰到「船坞满」弹窗的任务都会调到这里（大世界 OpsiScheduling 等）。
+        # 实测后果：低耗轮换因为换编队失败停下后，别的任务在跑的过程中
+        # 替它执行了这套退役，把船坞里留给下一批用的白皮船一并退光
+        # （9/25 12:03 OpsiScheduling 那 20 分钟）。
+        # 注意取 `task.command`：`config.task` 是 `Function` 对象，
+        # 任务名在它的 `command` 属性上（全项目都这么用，见 run.py:216 等）。
+        if getattr(self.config.task, 'command', None) != 'LowCostRotation':
+            logger.info('[退役-保留] 非低耗轮换任务，跳过')
+            return 0
+
+        # 注意：**不要**在这里调 dock_favourite_set()。
+        #
+        # 本函数紧跟在「退役废弃旗舰」之后执行，而那边已经关过收藏筛选，
+        # 中间也没有人再打开。实测此时再调一次，船坞卡片刚刷新完、界面尚未稳定，
+        # 开关会被判定为 unknown，Switch 便反复点击 COMMON_SHIP_FILTER_DISABLE。
+        # 由于低耗轮换关闭了卡死检测，这种反复点击不会超时——任务就此永久卡住
+        # （日志：18:17:48 起 [Favourite_filter] unknown 刷屏到日志结束）。
+        self.dock_sort_method_dsc_set(wait_loading=False)
+        self.dock_filter_set(index='dd', rarity='common', extra='not_level_max', sort='level')
+
+        # 与 retire_gems_farming_flagships() 同理：稀有度已由上面的筛选层限定，
+        # 扫描阶段再校验一次会让颜色采样异常的 'unknown' 卡被漏掉。
+        scanner = ShipScanner(fleet=0, status='free', level=(2, 99))
+        scanner.disable('emotion')
+        scanner.disable('rarity')
+
+        total = 0
+        skip_first_screenshot = True
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            self.handle_info_bar()
+            ships = scanner.scan(self.device.image)
+            if not ships:
+                # 没有符合的舰船，退出
+                break
+
+            for ship in ships:
+                self.device.click(ship.button)
+                self.device.sleep((0.1, 0.15))
+                total += 1
+
+            self._retirement_confirm()
+
+            # 少于 10 艘时快速退出
+            if len(ships) < 10:
+                break
+
+        # 退役完成，即将退出，无需等待加载
+        self.dock_filter_set(wait_loading=False)
+        logger.info(f'[退役-保留] 退役废弃先锋 {total} 艘')
         return total
 
     def handle_retirement(self):

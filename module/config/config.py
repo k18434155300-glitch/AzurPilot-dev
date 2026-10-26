@@ -241,7 +241,7 @@ class AzurLaneConfig(ConfigUpdater, ManualConfig, GeneratedConfig, ConfigWatcher
             func.startswith("Event")
             or func.startswith("Raid")
             or func.startswith("Coalition")
-            or func in ["MaritimeEscort", "GemsFarming", "ThreeOilLowCost"]
+            or func in ["MaritimeEscort", "GemsFarming", "ThreeOilLowCost", "LowCostRotation"]
         ):
             if "EventGeneral" not in func_list:
                 func_list.insert(0, "EventGeneral")
@@ -804,10 +804,22 @@ class AzurLaneConfig(ConfigUpdater, ManualConfig, GeneratedConfig, ConfigWatcher
         Returns:
             bool: 是否需要切换任务。
         """
-        # 更新事件
+        # 更新事件：紧急停止不受 _disable_task_switch 影响，必须优先响应
         if self.stop_event is not None:
             if self.stop_event.is_set():
                 return True
+        # 禁用任务切换期间，不响应任何切换请求（优先级切换与调度器让位均跳过）。
+        #
+        # 这个判断必须放在这里，而不能只留在 `check_task_switch()` 里：
+        # 不少任务循环是**直接调 `task_switched()`** 的（例如
+        # `CampaignRun.run()`、`GemsFarming.run()` 等），绕过
+        # `check_task_switch()` 就等于绕过了那个开关——表现为
+        # 「已经设了 _disable_task_switch，抢占照样在任务中途生效」。
+        # 紧急停止（stop_event）已在上方优先响应，不受此开关影响。
+        if getattr(self, '_disable_task_switch', False):
+            return False
+
+        # 新版调度器运行时：按调度方案 / 控油策略决定是否让位
         runtime = self.__dict__.get('_scheduler_runtime')
         if runtime is not None and runtime.mode != 'native':
             return runtime.should_yield(self)

@@ -444,6 +444,11 @@ class GeneratedConfig:
     GemsFarming_VanguardLevelMin = 1
     GemsFarming_VanguardLevelMax = 125
 
+    # 配置组 `LowCostRotation`
+    LowCostRotation_SortiesCount = 10
+    LowCostRotation_FlagshipLevelMax = 1
+    LowCostRotation_VanguardLevelMax = 1
+
     # 配置组 `EventGeneral`
     EventGeneral_PtLimit = 0
     EventGeneral_TimeLimit = datetime.datetime(2023, 1, 1, 0, 0)
